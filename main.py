@@ -87,8 +87,7 @@ def main():
             def on_status_trailer(trailer_text: str):
                 if overlay:
                     overlay.show_response_card(trailer_text, user_query=user_prompt)
-                    overlay.set_state("speaking")
-                audio.speak(trailer_text)
+                    overlay.set_state("thinking")
 
             response_text = brain.query(user_prompt, status_callback=on_status_trailer)
             active_m = getattr(brain, "last_used_model", getattr(brain.config, "model", "default"))

@@ -592,19 +592,20 @@ def search_and_play_spotify(query: str, search_x: int = None, search_y: int = No
         if is_my_library:
             return play_spotify_playlist_with_cursor("")
 
-        sx = search_x if (search_x is not None) else (r[0] + int(w * 0.44))
-        sy = search_y if (search_y is not None) else (r[1] + 36)
+        # Navigate directly to search query in Spotify Desktop
+        import urllib.parse
+        os.system(f'start spotify:search:"{clean_query}"')
+        time.sleep(0.35)
+        force_foreground_window(spotify_hwnd)
+        time.sleep(0.08)
 
-        glide_hardware_cursor(sx, sy, action="click", glide_time=0.32)
-        time.sleep(0.04)
-
-        # Clear & type
+        # Clear & type via Ctrl+K shortcut
         win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        win32api.keybd_event(ord('A'), 0, 0, 0)
+        win32api.keybd_event(ord('K'), 0, 0, 0)
         time.sleep(0.02)
-        win32api.keybd_event(ord('A'), 0, win32con.KEYEVENTF_KEYUP, 0)
+        win32api.keybd_event(ord('K'), 0, win32con.KEYEVENTF_KEYUP, 0)
         win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.03)
+        time.sleep(0.04)
 
         type_text(clean_query)
         time.sleep(0.04)
@@ -613,41 +614,20 @@ def search_and_play_spotify(query: str, search_x: int = None, search_y: int = No
         win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
         time.sleep(0.35)
 
-        # Try visual detection for the top search result track or play button
-        target_pos = None
-        try:
-            from assistant_tools import ground_screen_element
-            tx, ty, _, _ = ground_screen_element(f"Spotify top song result or play button for '{clean_query}'", "spotify")
-            if tx is not None and ty is not None:
-                target_pos = (tx, ty)
-        except Exception:
-            pass
+        # Hover over the Top Result card to reveal green play button
+        top_result_x = r[0] + int(w * 0.28)
+        top_result_y = r[1] + 240
+        glide_hardware_cursor(top_result_x, top_result_y, action="none", glide_time=0.22)
+        time.sleep(0.12)
 
-        if target_pos:
-            glide_hardware_cursor(target_pos[0], target_pos[1], action="click", glide_time=0.28)
-            time.sleep(0.05)
+        # Detect the revealed circular green play button on the Top Result card
+        green_btn = find_spotify_green_play_button(spotify_hwnd)
+        if green_btn:
+            glide_hardware_cursor(green_btn[0], green_btn[1], action="click", glide_time=0.25)
         else:
-            # Scour through the songs list visually
-            track_col_x = r[0] + int(w * 0.58)
-            row1_y = r[1] + 215
-            row2_y = r[1] + 270
-
-            glide_hardware_cursor(track_col_x, row1_y, action="none", glide_time=0.20)
-            time.sleep(0.08)
-            glide_hardware_cursor(track_col_x, row2_y, action="none", glide_time=0.18)
-            time.sleep(0.08)
-
-            # Check for visible green play button revealed by hover
-            green_btn = find_spotify_green_play_button(spotify_hwnd)
-            if green_btn:
-                gx, gy = green_btn
-                glide_hardware_cursor(gx, gy, action="click", glide_time=0.25)
-            else:
-                glide_hardware_cursor(track_col_x, row1_y, action="double_click", glide_time=0.25)
-                time.sleep(0.04)
-                win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+            first_song_x = r[0] + int(w * 0.60)
+            first_song_y = r[1] + 240
+            glide_hardware_cursor(first_song_x, first_song_y, action="double_click", glide_time=0.25)
 
         # Background Spotify CLI sync if available
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
@@ -723,16 +703,12 @@ def control_media_with_cursor(action: str = "pause", target_x: int = None, targe
             px = target_x if (target_x is not None) else (btn_pos[0] if btn_pos else (r[0] + int(w * ratio)))
             py = target_y if (target_y is not None) else (btn_pos[1] if btn_pos else (r[3] - 65))
 
-            # Visually glide to control button
+            # Visually glide to control button and click
             glide_hardware_cursor(px, py, action="click", glide_time=0.30)
             time.sleep(0.04)
 
-            # Spotify native shortcuts beat pixel guessing across responsive desktop UI
-            if act_lower in ("pause", "stop", "play", "resume", "unpause"):
-                win32api.keybd_event(win32con.VK_SPACE, 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(win32con.VK_SPACE, 0, win32con.KEYEVENTF_KEYUP, 0)
-            elif act_lower in ("next", "skip"):
+            # Secondary shortcuts for track navigation and volume
+            if act_lower in ("next", "skip"):
                 win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
                 win32api.keybd_event(win32con.VK_RIGHT, 0, 0, 0)
                 time.sleep(0.02)
@@ -1144,8 +1120,6 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
         # Visually glide to video player center
         vid_x = r[0] + w // 2
         vid_y = r[1] + int(h * 0.45)
-        glide_hardware_cursor(vid_x, vid_y, action="none", glide_time=0.20)
-        time.sleep(0.04)
 
         # Check for exact percentage volume
         target_pct = None
@@ -1171,9 +1145,9 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
             return True
 
         if act_lower in ("pause", "stop", "play", "resume", "unpause", "toggle_pause"):
-            win32api.keybd_event(ord('K'), 0, 0, 0)
-            time.sleep(0.03)
-            win32api.keybd_event(ord('K'), 0, win32con.KEYEVENTF_KEYUP, 0)
+            glide_hardware_cursor(vid_x, vid_y, action="click", glide_time=0.22)
+            time.sleep(0.04)
+            return True
         elif act_lower in ("volume_up", "louder", "up", "raise_volume"):
             glide_hardware_cursor(vid_x, vid_y, action="none", glide_time=0.15)
             for _ in range(3):

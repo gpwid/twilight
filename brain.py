@@ -643,16 +643,66 @@ class SciTwiBrain:
                         return f"[emotion: happy] Scrolled {dir_s} again for you!"
             return "[emotion: flustered] What would you like me to do again?"
 
-        # 2. Immediate YouTube / Video Controls (pause, resume, video volume, mute, subtitles, fullscreen, skip ad)
-        if re.search(r'\b(?:pause|stop)\b.*\b(?:video|stream|livestream|youtube|playback|player)\b|^(?:please\s+)?pause\b|^stop\s+video\b', user_lower):
-            if status_callback:
-                status_callback("Pausing the video for you!")
+        # 2. Immediate Music / Spotify Controls ("pause the song", "pause music", "pause spotify", "resume music")
+        if re.search(r'\b(?:pause|stop)\s+(?:the\s+)?(?:song|music|track|spotify|playlist)\b', user_lower):
+            _exec_record(control_spotify, "pause")
+            return "[emotion: music] Paused your music for you!"
+
+        if re.search(r'\b(?:resume|unpause)\s+(?:the\s+)?(?:song|music|track|spotify|playlist)\b', user_lower):
+            _exec_record(control_spotify, "resume")
+            return "[emotion: music] Resumed your music for you!"
+
+        if re.search(r'\b(?:next|skip)\s+(?:song|track|music)\b|\bskip\s+(?:to\s+next|ahead)\b', user_lower) and "ad" not in user_lower:
+            _exec_record(control_spotify, "next")
+            return "[emotion: music] Skipped to the next track for you!"
+
+        if re.search(r'\b(?:previous|prev|back)\s+(?:song|track)\b', user_lower):
+            _exec_record(control_spotify, "previous")
+            return "[emotion: music] Went back to the previous track for you!"
+
+        # Direct Spotify search & play ("play any clairo song on spotify", "play sunsetz on spotify")
+        m_sp_play = re.search(r'^(?:please\s+)?(?:open\s+up\s+spotify\s+and\s+)?play\s+(?:any\s+|some\s+)?(.+?)\s+on\s+spotify$', user_lower)
+        if m_sp_play:
+            q_artist = m_sp_play.group(1).strip()
+            q_artist = re.sub(r'\s+songs?$', '', q_artist).strip()
+            if "playlist" in q_artist:
+                _exec_record(play_playlist, q_artist)
+                return f"[emotion: music] Putting on {q_artist} for us on Spotify!"
+            _exec_record(play_spotify, q_artist)
+            return f"[emotion: music] Putting on some {q_artist} for us on Spotify!"
+
+        # Direct YouTube play ("play a youtube video from markiplier, recent one", "play bohemian rhapsody on youtube")
+        m_yt_play = re.search(r'^(?:please\s+)?(?:play|watch|pull up)\s+(?:a\s+)?(?:youtube\s+video\s+(?:of|from|about)?\s*|video\s+(?:of|from|about)?\s*)?(.+?)(?:\s+on\s+youtube)?$', user_lower)
+        if m_yt_play and any(k in user_lower for k in ("youtube", "video", "yt", "livestream", "stream")) and not any(k in user_lower for k in ("spotify", "song", "track")):
+            target_q = m_yt_play.group(1).strip()
+            if target_q and target_q not in ("video", "youtube", "the video", "a video", "stream", "livestream"):
+                _exec_record(play_youtube, target_q)
+                return f"[emotion: happy] Pulling up {target_q} on YouTube for you!"
+
+        # 3. Immediate YouTube / Video Controls (pause, resume, video volume, mute, subtitles, fullscreen, skip ad)
+        # Note: ONLY match video/stream controls; never match "play a video" (which is handled above)
+        if re.search(r'\b(?:pause|stop)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b|^pause\s+video\b', user_lower):
             _exec_record(control_youtube_video, "pause")
             return "[emotion: happy] Paused the video for you!"
 
-        if re.search(r'\b(?:resume|play|unpause)\b.*\b(?:video|stream|livestream|youtube|playback|player)\b|^(?:please\s+)?(?:resume|unpause)\b', user_lower):
-            if status_callback:
-                status_callback("Resuming the video for you!")
+        if re.search(r'\b(?:resume|unpause)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b|^resume\s+video\b|^unpause\s+video\b', user_lower):
+            _exec_record(control_youtube_video, "play")
+            return "[emotion: happy] Resumed the video for you!"
+
+        # Standalone "pause" / "resume" with no target: check active media
+        if re.match(r'^(?:please\s+)?pause\b(?:\s+it)?$', user_lower):
+            now_p = get_now_playing()
+            if now_p and "spotify" in now_p.lower():
+                _exec_record(control_spotify, "pause")
+                return "[emotion: music] Paused your music for you!"
+            _exec_record(control_youtube_video, "pause")
+            return "[emotion: happy] Paused the video for you!"
+
+        if re.match(r'^(?:please\s+)?(?:resume|unpause)\b(?:\s+it)?$', user_lower):
+            now_p = get_now_playing()
+            if now_p and "spotify" in now_p.lower():
+                _exec_record(control_spotify, "resume")
+                return "[emotion: music] Resumed your music for you!"
             _exec_record(control_youtube_video, "play")
             return "[emotion: happy] Resumed the video for you!"
 
@@ -916,7 +966,7 @@ class SciTwiBrain:
                             system_instruction=dynamic_system_prompt,
                             temperature=0.75,
                             thinking_config=self._get_thinking_config(model_name),
-                            http_options=types.HttpOptions(timeout=12000),
+                            http_options=types.HttpOptions(timeout=60000),
                         ),
                     )
                     response = chat.send_message(parts)
