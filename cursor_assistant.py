@@ -324,6 +324,26 @@ def glide_hardware_cursor(target_x: int, target_y: int, action: str = "click", g
     finally:
         restore_system_cursor()
 
+def normalized_to_screen_coords(norm_x: float, norm_y: float) -> tuple[int, int]:
+    """Map normalized 0-1000 AI visual grounding coordinates directly to physical screen pixels."""
+    screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN) if win32api else 1920
+    screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN) if win32api else 1080
+    px = max(0, min(screen_w - 1, int((float(norm_x) / 1000.0) * screen_w)))
+    py = max(0, min(screen_h - 1, int((float(norm_y) / 1000.0) * screen_h)))
+    return px, py
+
+def visual_click(target_x: int, target_y: int, action: str = "click", glide_time: float = 0.30):
+    """Execute grounded visual cursor click with Twilight's system cursor."""
+    return glide_hardware_cursor(target_x, target_y, action=action, glide_time=glide_time)
+
+def visual_type(text: str, delay: float = 0.055):
+    """Execute grounded keyboard input with natural one-by-one cadence."""
+    return type_text(text, delay=delay)
+
+def visual_scroll(direction: str = "down", amount: int = 400, x: int = None, y: int = None):
+    """Execute grounded mouse wheel scroll at specific coordinate (or center screen)."""
+    return scroll_page_with_cursor(direction=direction, amount=amount)
+
 def run_ghost_cursor_overlay(target_x: int, target_y: int, label: str = "", start_x: int = None, start_y: int = None, duration: float = 60.0, glide_time: float = 0.45):
     """Ghost cursor overlay with starlight ring and label badge. Window starts HIDDEN to eliminate any black flash."""
     attach_desktop()

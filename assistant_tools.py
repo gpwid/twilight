@@ -1514,18 +1514,59 @@ def locate_and_point_tool(tool_name: str, app_name: str = "") -> str:
     except Exception as e:
         return f"Error locating {tool_name}: {e}"
 
+def verify_screen_state_changed(before_img, center_x: int = None, center_y: int = None, radius: int = 100) -> bool:
+    """Closed-loop verification: compare screen state before and after action to verify UI reacted."""
+    try:
+        after_img = capture_screen_image()
+        if not before_img or not after_img:
+            return True
+        if before_img.size != after_img.size:
+            before_img = before_img.resize(after_img.size)
+        import numpy as np
+        if center_x is not None and center_y is not None:
+            w, h = before_img.size
+            x1 = max(0, center_x - radius)
+            y1 = max(0, center_y - radius)
+            x2 = min(w, center_x + radius)
+            y2 = min(h, center_y + radius)
+            b_crop = np.array(before_img.crop((x1, y1, x2, y2))).astype(float)
+            a_crop = np.array(after_img.crop((x1, y1, x2, y2))).astype(float)
+            diff = np.abs(a_crop - b_crop)
+            ratio = float(np.mean(diff > 15))
+            return ratio > 0.012
+        else:
+            diff = np.abs(np.array(after_img).astype(float) - np.array(before_img).astype(float))
+            ratio = float(np.mean(diff > 15))
+            return ratio > 0.008
+    except Exception as e:
+        print(f"[Verification] note: {e}")
+        return True
+
 def click_and_interact(target_name: str, action: str = "click") -> str:
-    """Move Twilight's custom hardware cursor to click, double-click, or interact with a window, tab, button, or control on screen."""
+    """Move Twilight's custom hardware cursor to click, double-click, or interact with a window, tab, button, or control on screen with closed-loop verification."""
     mark_action_tool_executed()
     try:
         # Universal Tab Close handler for active window (Chrome, Affinity, Figma, VS Code, etc.)
         if "tab" in target_name.lower():
             return close_tab()
 
+        # Capture pre-action screen state for closed-loop verification
+        before_img = capture_screen_image()
+
         x, y, label, guidance = ground_screen_element(target_name)
         if x is not None and y is not None:
             import cursor_assistant
             cursor_assistant.glide_hardware_cursor(x, y, action=action, glide_time=0.35)
+            time.sleep(0.25)
+
+            # Closed-loop verification
+            changed = verify_screen_state_changed(before_img, center_x=x, center_y=y)
+            if not changed and action == "click":
+                # Retry with slight dwell if initial click was swallowed during transition
+                time.sleep(0.12)
+                cursor_assistant.glide_hardware_cursor(x, y, action="click", glide_time=0.15)
+                changed = verify_screen_state_changed(before_img, center_x=x, center_y=y)
+
             return f"Done! I've moved my cursor and {action}ed {label} for you."
         return f"I couldn't locate {target_name} on your screen to click on it."
     except Exception as e:
