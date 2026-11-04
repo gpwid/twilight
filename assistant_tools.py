@@ -1739,6 +1739,9 @@ def switch_to_tab(target: str) -> str:
         ok = cursor_assistant.switch_to_tab_or_window(target)
         if ok:
             return f"Switched over to {target} for you!"
+        if any(w in target.lower() for w in ("youtube", "livestream", "stream", "google", "wikipedia", "video", "news")):
+            cursor_assistant.browser_navigate_history("back")
+            return f"Navigated back toward {target} for you."
         return f"Could not find an open tab or window matching '{target}'."
     except Exception as e:
         return f"Error switching to tab: {e}"

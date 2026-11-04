@@ -1066,7 +1066,7 @@ def switch_to_tab_or_window(target: str):
             win32api.keybd_event(ord('A'), 0, win32con.KEYEVENTF_KEYUP, 0)
             win32api.keybd_event(win32con.VK_SHIFT, 0, win32con.KEYEVENTF_KEYUP, 0)
             win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-            time.sleep(0.20)
+            time.sleep(0.35)
 
             search_query = " ".join(words[:2]) if words else clean
             import win32clipboard

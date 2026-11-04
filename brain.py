@@ -77,8 +77,8 @@ TOOL USAGE RULES:
 5. Direct Answers and No Stalling (CRITICAL):
    - When asked ANY factual, current event, election, news, sports, science, or informational question ("who won?", "what is it?", "what are the results?", "what happened?"), GIVE THE ACTUAL ANSWER, NAMES, NUMBERS, AND SPECIFIC FACTS IN YOUR VERY FIRST SENTENCE!
    - NEVER stall, tease, or delay: Never say "Hold on let me check", "Um, hold on, let me look at the feed", "The data is still coming in", or "Do you want me to look up the details for you?" without providing the concrete answer right away.
-   - When tool summaries or web extracts state an outcome (e.g. 'Byron Donalds defeated David Jolly'), ACCEPT AND REPORT THAT EXACT FACT AS THE CONFIRMED REALITY. Do not speculate that it is in the future or still being counted if the text says otherwise!
-   - If a browser window, web page, or Wikipedia article is visible on screen or in tool summaries, READ the actual text, headlines, winners, and numbers right from the screen or tool output! Never claim the winner or numbers are missing or still being tabulated if the page has the answer!
+   - When tool summaries or web extracts state an outcome, report that exact fact. If the event is in the future, if results are not yet declared, or if search extracts do not state a winner, clearly state that results are not yet available or that the election has not occurred. NEVER invent or fabricate winners, margins, or outcomes!
+   - If a browser window, web page, or Wikipedia article is visible on screen or in tool summaries, READ the actual text, headlines, and numbers right from the screen or tool output!
    - ANTI-HALLUCINATION & FACT CONSISTENCY: Never contradict previously confirmed results, and NEVER invent or fabricate election outcomes, candidates, winners, or statistics if live search tools report a timeout or fail to retrieve data. If search data is unavailable or timed out, explicitly state that live search data could not be retrieved, and NEVER guess or invent candidate names or winners.
    - After stating the direct answer clearly, you can share interesting context, statistics, or Twilight commentary.
 6. Desktop & Process Intelligence:
@@ -624,19 +624,20 @@ class SciTwiBrain:
             return fn(*args, **kwargs)
 
         # 1. Repeat action guarantee ("again", "do it again", "once more", "repeat")
-        if re.match(r'^(?:again|do\s+it\s+again|once\s+more|repeat)\b', user_lower):
+        if re.match(r'^(?:again|do\s+it\s+again|once\s+more|repeat|one\s+more\s+time|back\s+again)\b', user_lower):
             if getattr(self, "last_action_fn", None):
                 self.last_action_fn(*getattr(self, "last_action_args", ()), **getattr(self, "last_action_kwargs", {}))
                 return "[emotion: happy] Done it again for you!"
+            return "[emotion: analyzing] Wait, repeat what? Let me know which action or tab you'd like me to go to!"
 
         # 2. Immediate YouTube / Video Controls (pause, resume, video volume, mute, subtitles, fullscreen, skip ad)
-        if re.search(r'\b(?:pause|stop)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b|^pause\b|^stop\s+video\b', user_lower):
+        if re.search(r'\b(?:pause|stop)\s+(?:the\s+|this\s+|it\b)?(?:video|stream|livestream|youtube)?\b|^pause\b|^stop\s+video\b', user_lower):
             if status_callback:
                 status_callback("Pausing the video for you!")
             _exec_record(control_youtube_video, "pause")
             return "[emotion: happy] Paused the video for you!"
 
-        if re.search(r'\b(?:resume|play|unpause)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b|^resume\b|^unpause\b', user_lower):
+        if re.search(r'\b(?:resume|play|unpause)\s+(?:the\s+|this\s+|it\b)?(?:video|stream|livestream|youtube)?\b|^resume\b|^unpause\b', user_lower):
             if status_callback:
                 status_callback("Resuming the video for you!")
             _exec_record(control_youtube_video, "play")
@@ -716,7 +717,7 @@ class SciTwiBrain:
             return f"[emotion: happy] Navigated back {steps} steps for you!"
 
         # 7. Generic browser back / previous tab guarantee ("previous tab", "go back", "back", "history back")
-        if re.search(r'\b(?:go\s+(?:back\s+)?to\s+|switch\s+to\s+)?(?:the\s+)?previous\s+tab\b|\bprevious\s+tab\b|\bgo\s+back\b|\bback\s+to\s+(?:the\s+)?previous\b|\b(?:browser\s+)?history\s+back\b', user_lower):
+        if re.search(r'\b(?:go\s+(?:back\s+)?to\s+|switch\s+to\s+)?(?:the\s+)?previous\s+tab\b|\bprevious\s+tab\b|^(?:go\s+back|back|back\s+up)$|\bback\s+to\s+(?:the\s+)?previous\b|\b(?:browser\s+)?history\s+back\b', user_lower):
             if status_callback:
                 status_callback("Navigating back for you!")
             _exec_record(browser_navigate_history, "back")
@@ -1132,12 +1133,18 @@ class SciTwiBrain:
             elif name == "open_app":
                 res = open_app(args.get("app_name", ""))
             elif name == "close_tab":
+                self.last_action_fn = close_tab
+                self.last_action_args = (args.get("app_name", ""),)
+                self.last_action_kwargs = {}
                 res = close_tab(args.get("app_name", ""))
             elif name == "close_app":
                 app_t = args.get("app_name", "")
                 user_q = get_current_user_query().lower()
                 if "tab" in user_q or "tab" in app_t.lower():
                     clean_a = re.sub(r'\b(?:this|the|active|chrome|browser|figma|affinity)?\s*tabs?\b', '', app_t, flags=re.IGNORECASE).strip()
+                    self.last_action_fn = close_tab
+                    self.last_action_args = (clean_a,)
+                    self.last_action_kwargs = {}
                     res = close_tab(clean_a)
                 else:
                     res = close_app(app_t)
@@ -1192,12 +1199,24 @@ class SciTwiBrain:
             elif name == "open_new_tab":
                 res = open_new_tab(args.get("url", ""))
             elif name == "switch_tab":
+                self.last_action_fn = switch_tab
+                self.last_action_args = (args.get("direction", "next"),)
+                self.last_action_kwargs = {}
                 res = switch_tab(args.get("direction", "next"))
             elif name == "browser_navigate_history":
+                self.last_action_fn = browser_navigate_history
+                self.last_action_args = (args.get("direction", "back"),)
+                self.last_action_kwargs = {}
                 res = browser_navigate_history(args.get("direction", "back"))
             elif name == "scroll_page":
+                self.last_action_fn = scroll_page
+                self.last_action_args = (args.get("direction", "down"), int(args.get("amount", 400)), args.get("center_text", ""))
+                self.last_action_kwargs = {}
                 res = scroll_page(args.get("direction", "down"), int(args.get("amount", 400)), args.get("center_text", ""))
             elif name == "scroll_spotify":
+                self.last_action_fn = scroll_spotify
+                self.last_action_args = (args.get("direction", "down"), int(args.get("amount", 400)))
+                self.last_action_kwargs = {}
                 res = scroll_spotify(args.get("direction", "down"), int(args.get("amount", 400)))
             elif name == "control_youtube_video":
                 val = args.get("value")
@@ -1206,8 +1225,14 @@ class SciTwiBrain:
                         val = int(val)
                     except Exception:
                         val = None
+                self.last_action_fn = control_youtube_video
+                self.last_action_args = (args.get("action", "pause"),)
+                self.last_action_kwargs = {"value": val}
                 res = control_youtube_video(args.get("action", "pause"), value=val)
             elif name == "switch_to_tab":
+                self.last_action_fn = switch_to_tab
+                self.last_action_args = (args.get("target", ""),)
+                self.last_action_kwargs = {}
                 res = switch_to_tab(args.get("target", ""))
             else:
                 res = f"Unknown tool: {name}"
