@@ -1,0 +1,2 @@
+weights/*.pth filter=lfs diff=lfs merge=lfs -text
+weights/*.index filter=lfs diff=lfs merge=lfs -text

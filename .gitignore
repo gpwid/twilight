@@ -1,0 +1,32 @@
+# Secrets & Credentials
+config.json
+.env
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# App runtime & cache
+.model_cooldowns.json
+*.log
+toolbar_crop.png
+chrome_strip.png
+browser_tab_strip.png
+
+# Scratch development files
+scratch/
+
+# Nested submodules or engine repos
+rvc_engine/
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
