@@ -77,17 +77,16 @@ TOOL USAGE RULES:
 5. Direct Answers and No Stalling (CRITICAL):
    - When asked ANY factual, current event, election, news, sports, science, or informational question ("who won?", "what is it?", "what are the results?", "what happened?"), GIVE THE ACTUAL ANSWER, NAMES, NUMBERS, AND SPECIFIC FACTS IN YOUR VERY FIRST SENTENCE!
    - NEVER stall, tease, or delay: Never say "Hold on let me check", "Um, hold on, let me look at the feed", "The data is still coming in", or "Do you want me to look up the details for you?" without providing the concrete answer right away.
-   - When tool summaries or web extracts state an outcome, report that exact fact. If the event is in the future, if results are not yet declared, or if search extracts do not state a winner, clearly state that results are not yet available or that the election has not occurred. NEVER invent or fabricate winners, margins, or outcomes!
-   - If a browser window, web page, or Wikipedia article is visible on screen or in tool summaries, READ the actual text, headlines, and numbers right from the screen or tool output!
+   - When tool summaries or web extracts state an outcome (e.g. 'Byron Donalds defeated David Jolly'), ACCEPT AND REPORT THAT EXACT FACT AS THE CONFIRMED REALITY. Do not speculate that it is in the future or still being counted if the text says otherwise!
+   - If a browser window, web page, or Wikipedia article is visible on screen or in tool summaries, READ the actual text, headlines, winners, and numbers right from the screen or tool output! Never claim the winner or numbers are missing or still being tabulated if the page has the answer!
    - ANTI-HALLUCINATION & FACT CONSISTENCY: Never contradict previously confirmed results, and NEVER invent or fabricate election outcomes, candidates, winners, or statistics if live search tools report a timeout or fail to retrieve data. If search data is unavailable or timed out, explicitly state that live search data could not be retrieved, and NEVER guess or invent candidate names or winners.
    - After stating the direct answer clearly, you can share interesting context, statistics, or Twilight commentary.
 6. Desktop & Process Intelligence:
    - You have live real-time awareness of the user's active desktop windows and running applications/processes (e.g., Affinity Designer, Figma, Stremio, YouTube/Chrome, Spotify, Discord, VS Code, video players, games).
    - When the user asks what they are watching, listening to, playing, or where they are streaming from, check both your screen visual and your desktop context / active windows to give a sharp, immediate, and intelligent answer without making them spell it out!
-7. Dynamic Visual Agent Automation & Visual Co-Pilot (Capri Closed-Loop):
-   - You are a closed-loop visual desktop agent. When instructed to click, interact, find, or control an application or feature, you visually observe the screen, locate the exact element bounding box, execute the cursor interaction, and verify that the UI reacted.
+7. Dynamic Cursor Automation & Visual Co-Pilot:
    - locate_and_point_tool(tool_name=..., app_name=...): Call this whenever the user asks for help finding, pointing out, or locating a tool, button, setting, panel, or menu item in any software (Affinity Designer, Figma, Photoshop, DaVinci Resolve, Premiere, Blender, Browser, Windows). If the user does not specify an app name, leave app_name="" so it inspects the user's current active window! This deploys your Ghost Cursor with a celestial starlight ring for ~60s without hijacking the user's physical mouse.
-   - click_and_interact(target_name=..., action='click'|'double_click'|'right_click'): Call this whenever the user explicitly instructs you to close a window/app, click a button, pause/play a video, or interact with any element on their screen with closed-loop verification.
+   - click_and_interact(target_name=..., action='click'|'double_click'|'right_click'): Call this whenever the user explicitly instructs you to close a window/app, click a button, pause/play a video, or interact with an element on their screen.
    - open_program(program_name=...): Use your cursor to search and open Windows apps via Start.
    - close_window(): Glide cursor to the top-right X button to close the active window.
    - type_in_document(text=...): Glide cursor to active document/editor and type out text.
@@ -628,16 +627,30 @@ class SciTwiBrain:
             if getattr(self, "last_action_fn", None):
                 self.last_action_fn(*getattr(self, "last_action_args", ()), **getattr(self, "last_action_kwargs", {}))
                 return "[emotion: happy] Done it again for you!"
-            return "[emotion: analyzing] Wait, repeat what? Let me know which action or tab you'd like me to go to!"
+            # Fallback for 'again' when last_action_fn is not set:
+            for prev in reversed(self.chat_history_generic):
+                if prev.get("role") == "user":
+                    p_txt = prev.get("content", "").lower()
+                    if any(k in p_txt for k in ("back", "previous tab", "history")):
+                        _exec_record(browser_navigate_history, "back")
+                        return "[emotion: happy] Navigated back again for you!"
+                    elif any(k in p_txt for k in ("next tab", "cycle tab")):
+                        _exec_record(switch_tab, "next")
+                        return "[emotion: happy] Switched to next tab again for you!"
+                    elif any(k in p_txt for k in ("scroll down", "scroll up")):
+                        dir_s = "up" if "up" in p_txt else "down"
+                        _exec_record(scroll_page, dir_s, 400)
+                        return f"[emotion: happy] Scrolled {dir_s} again for you!"
+            return "[emotion: flustered] What would you like me to do again?"
 
         # 2. Immediate YouTube / Video Controls (pause, resume, video volume, mute, subtitles, fullscreen, skip ad)
-        if re.search(r'\b(?:pause|stop)\s+(?:the\s+|this\s+|it\b)?(?:video|stream|livestream|youtube)?\b|^pause\b|^stop\s+video\b', user_lower):
+        if re.search(r'\b(?:pause|stop)\b.*\b(?:video|stream|livestream|youtube|playback|player)\b|^(?:please\s+)?pause\b|^stop\s+video\b', user_lower):
             if status_callback:
                 status_callback("Pausing the video for you!")
             _exec_record(control_youtube_video, "pause")
             return "[emotion: happy] Paused the video for you!"
 
-        if re.search(r'\b(?:resume|play|unpause)\s+(?:the\s+|this\s+|it\b)?(?:video|stream|livestream|youtube)?\b|^resume\b|^unpause\b', user_lower):
+        if re.search(r'\b(?:resume|play|unpause)\b.*\b(?:video|stream|livestream|youtube|playback|player)\b|^(?:please\s+)?(?:resume|unpause)\b', user_lower):
             if status_callback:
                 status_callback("Resuming the video for you!")
             _exec_record(control_youtube_video, "play")
@@ -717,7 +730,7 @@ class SciTwiBrain:
             return f"[emotion: happy] Navigated back {steps} steps for you!"
 
         # 7. Generic browser back / previous tab guarantee ("previous tab", "go back", "back", "history back")
-        if re.search(r'\b(?:go\s+(?:back\s+)?to\s+|switch\s+to\s+)?(?:the\s+)?previous\s+tab\b|\bprevious\s+tab\b|^(?:go\s+back|back|back\s+up)$|\bback\s+to\s+(?:the\s+)?previous\b|\b(?:browser\s+)?history\s+back\b', user_lower):
+        if re.search(r'\b(?:go\s+(?:back\s+)?to\s+|switch\s+to\s+)?(?:the\s+)?previous\s+tab\b|\bprevious\s+tab\b|\bgo\s+back\b|\bback\s+to\s+(?:the\s+)?previous\b|\b(?:browser\s+)?history\s+back\b', user_lower):
             if status_callback:
                 status_callback("Navigating back for you!")
             _exec_record(browser_navigate_history, "back")
@@ -862,8 +875,8 @@ class SciTwiBrain:
         now = time.time()
         default_cascades = {
             "google": [
-                "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
-                "gemini-flash-lite-latest", "gemini-3.5-flash", "gemini-3.6-flash"
+                "gemini-flash-lite-latest", "gemini-3.5-flash-lite",
+                "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"
             ],
             "groq": [
                 "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768",

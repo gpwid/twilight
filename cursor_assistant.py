@@ -324,26 +324,6 @@ def glide_hardware_cursor(target_x: int, target_y: int, action: str = "click", g
     finally:
         restore_system_cursor()
 
-def normalized_to_screen_coords(norm_x: float, norm_y: float) -> tuple[int, int]:
-    """Map normalized 0-1000 AI visual grounding coordinates directly to physical screen pixels."""
-    screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN) if win32api else 1920
-    screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN) if win32api else 1080
-    px = max(0, min(screen_w - 1, int((float(norm_x) / 1000.0) * screen_w)))
-    py = max(0, min(screen_h - 1, int((float(norm_y) / 1000.0) * screen_h)))
-    return px, py
-
-def visual_click(target_x: int, target_y: int, action: str = "click", glide_time: float = 0.30):
-    """Execute grounded visual cursor click with Twilight's system cursor."""
-    return glide_hardware_cursor(target_x, target_y, action=action, glide_time=glide_time)
-
-def visual_type(text: str, delay: float = 0.055):
-    """Execute grounded keyboard input with natural one-by-one cadence."""
-    return type_text(text, delay=delay)
-
-def visual_scroll(direction: str = "down", amount: int = 400, x: int = None, y: int = None):
-    """Execute grounded mouse wheel scroll at specific coordinate (or center screen)."""
-    return scroll_page_with_cursor(direction=direction, amount=amount)
-
 def run_ghost_cursor_overlay(target_x: int, target_y: int, label: str = "", start_x: int = None, start_y: int = None, duration: float = 60.0, glide_time: float = 0.45):
     """Ghost cursor overlay with starlight ring and label badge. Window starts HIDDEN to eliminate any black flash."""
     attach_desktop()
@@ -546,15 +526,25 @@ def play_spotify_playlist_with_cursor(playlist_name: str = ""):
                 glide_hardware_cursor(card_x, card_y, action="click", glide_time=0.32)
                 time.sleep(0.35)
 
-        # 3. Detect and click the big green circular play button on the playlist header
+        # 3. Detect and click the big circular play button on the playlist header
         green_btn = find_spotify_green_play_button(spotify_hwnd)
         if green_btn:
             gx, gy = green_btn
             glide_hardware_cursor(gx, gy, action="click", glide_time=0.35)
         else:
-            fallback_gx = r[0] + 145
-            fallback_gy = r[1] + 330
-            glide_hardware_cursor(fallback_gx, fallback_gy, action="click", glide_time=0.35)
+            try:
+                from assistant_tools import ground_screen_element
+                px, py, _, _ = ground_screen_element("Spotify big circular play button on playlist header", "spotify")
+                if px is not None and py is not None:
+                    glide_hardware_cursor(px, py, action="click", glide_time=0.35)
+                else:
+                    fallback_gx = r[0] + 145
+                    fallback_gy = r[1] + 330
+                    glide_hardware_cursor(fallback_gx, fallback_gy, action="click", glide_time=0.35)
+            except Exception:
+                fallback_gx = r[0] + 145
+                fallback_gy = r[1] + 330
+                glide_hardware_cursor(fallback_gx, fallback_gy, action="click", glide_time=0.35)
 
         time.sleep(0.05)
         win32api.keybd_event(win32con.VK_SPACE, 0, 0, 0)
@@ -623,27 +613,41 @@ def search_and_play_spotify(query: str, search_x: int = None, search_y: int = No
         win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
         time.sleep(0.35)
 
-        # Scour through the songs list visually
-        track_col_x = r[0] + int(w * 0.58)
-        row1_y = r[1] + 215
-        row2_y = r[1] + 270
+        # Try visual detection for the top search result track or play button
+        target_pos = None
+        try:
+            from assistant_tools import ground_screen_element
+            tx, ty, _, _ = ground_screen_element(f"Spotify top song result or play button for '{clean_query}'", "spotify")
+            if tx is not None and ty is not None:
+                target_pos = (tx, ty)
+        except Exception:
+            pass
 
-        glide_hardware_cursor(track_col_x, row1_y, action="none", glide_time=0.20)
-        time.sleep(0.08)
-        glide_hardware_cursor(track_col_x, row2_y, action="none", glide_time=0.18)
-        time.sleep(0.08)
-
-        # Check for visible green play button revealed by hover
-        green_btn = find_spotify_green_play_button(spotify_hwnd)
-        if green_btn:
-            gx, gy = green_btn
-            glide_hardware_cursor(gx, gy, action="click", glide_time=0.25)
+        if target_pos:
+            glide_hardware_cursor(target_pos[0], target_pos[1], action="click", glide_time=0.28)
+            time.sleep(0.05)
         else:
-            glide_hardware_cursor(track_col_x, row1_y, action="double_click", glide_time=0.25)
-            time.sleep(0.04)
-            win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-            time.sleep(0.02)
-            win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+            # Scour through the songs list visually
+            track_col_x = r[0] + int(w * 0.58)
+            row1_y = r[1] + 215
+            row2_y = r[1] + 270
+
+            glide_hardware_cursor(track_col_x, row1_y, action="none", glide_time=0.20)
+            time.sleep(0.08)
+            glide_hardware_cursor(track_col_x, row2_y, action="none", glide_time=0.18)
+            time.sleep(0.08)
+
+            # Check for visible green play button revealed by hover
+            green_btn = find_spotify_green_play_button(spotify_hwnd)
+            if green_btn:
+                gx, gy = green_btn
+                glide_hardware_cursor(gx, gy, action="click", glide_time=0.25)
+            else:
+                glide_hardware_cursor(track_col_x, row1_y, action="double_click", glide_time=0.25)
+                time.sleep(0.04)
+                win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
+                time.sleep(0.02)
+                win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
 
         # Background Spotify CLI sync if available
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
@@ -706,9 +710,18 @@ def control_media_with_cursor(action: str = "pause", target_x: int = None, targe
             r = win32gui.GetWindowRect(spotify_hwnd)
             w = r[2] - r[0]
 
+            btn_pos = None
+            try:
+                from assistant_tools import ground_screen_element
+                bx, by, _, _ = ground_screen_element(f"Spotify bottom bar {act_lower} button", "spotify")
+                if bx is not None and by is not None:
+                    btn_pos = (bx, by)
+            except Exception:
+                pass
+
             ratio = btn_map.get(act_lower, 0.501)
-            px = target_x if (target_x is not None) else (r[0] + int(w * ratio))
-            py = target_y if (target_y is not None) else (r[3] - 65)
+            px = target_x if (target_x is not None) else (btn_pos[0] if btn_pos else (r[0] + int(w * ratio)))
+            py = target_y if (target_y is not None) else (btn_pos[1] if btn_pos else (r[3] - 65))
 
             # Visually glide to control button
             glide_hardware_cursor(px, py, action="click", glide_time=0.30)
@@ -883,32 +896,18 @@ def close_active_browser_tab(target_x: int = None, target_y: int = None):
                     tab_x = r[0] + min(w - 150, max(200, int(w * 0.25)))
                     tab_y = r[1] + 20
 
-            # Closed-loop pre-action capture
-            from assistant_tools import capture_screen_image, verify_screen_state_changed
-            before_tab_img = capture_screen_image()
-
             # 1. Visually glide Twilight's cursor right onto the active tab close button with click!
             glide_hardware_cursor(tab_x, tab_y, action="click", glide_time=0.30)
-            time.sleep(0.12)
+            time.sleep(0.05)
 
-            # 2. Closed-loop verification: did the tab strip react / close?
-            tab_closed = verify_screen_state_changed(before_tab_img, center_x=tab_x, center_y=tab_y, radius=60)
-            if not tab_closed:
-                # Retry visual click once with short dwell
-                time.sleep(0.08)
-                glide_hardware_cursor(tab_x, tab_y, action="click", glide_time=0.15)
-                time.sleep(0.12)
-                tab_closed = verify_screen_state_changed(before_tab_img, center_x=tab_x, center_y=tab_y, radius=60)
-
-            # Only fallback to Ctrl+W if visual click did not close the tab
-            if not tab_closed:
-                force_foreground_window(fg)
-                time.sleep(0.03)
-                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-                win32api.keybd_event(ord('W'), 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(ord('W'), 0, win32con.KEYEVENTF_KEYUP, 0)
-                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+            # 2. Re-assert foreground and dispatch Ctrl+W safety guarantee in case click was slightly off
+            force_foreground_window(fg)
+            time.sleep(0.03)
+            win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+            win32api.keybd_event(ord('W'), 0, 0, 0)
+            time.sleep(0.02)
+            win32api.keybd_event(ord('W'), 0, win32con.KEYEVENTF_KEYUP, 0)
+            win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
             return True
         except Exception as e:
             print(f"[Cursor] close_active_browser_tab error: {e}")
@@ -1080,7 +1079,7 @@ def switch_to_tab_or_window(target: str):
             win32api.keybd_event(ord('A'), 0, win32con.KEYEVENTF_KEYUP, 0)
             win32api.keybd_event(win32con.VK_SHIFT, 0, win32con.KEYEVENTF_KEYUP, 0)
             win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-            time.sleep(0.35)
+            time.sleep(0.20)
 
             search_query = " ".join(words[:2]) if words else clean
             import win32clipboard
@@ -1198,8 +1197,6 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
             time.sleep(0.03)
             win32api.keybd_event(ord('F'), 0, win32con.KEYEVENTF_KEYUP, 0)
         elif act_lower in ("skip_ad", "skip_ads", "skip ad"):
-            from assistant_tools import capture_screen_image, verify_screen_state_changed
-            before_ad_img = capture_screen_image()
             skip_pos = None
             try:
                 from assistant_tools import ground_screen_element
@@ -1217,12 +1214,7 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
                 skip_pos = (skip_x, skip_y)
 
             glide_hardware_cursor(skip_pos[0], skip_pos[1], action="click", glide_time=0.30)
-            time.sleep(0.15)
-            # Closed-loop verification: retry if ad button did not react
-            ad_skipped = verify_screen_state_changed(before_ad_img, center_x=skip_pos[0], center_y=skip_pos[1], radius=80)
-            if not ad_skipped:
-                time.sleep(0.10)
-                glide_hardware_cursor(skip_pos[0], skip_pos[1], action="click", glide_time=0.15)
+            time.sleep(0.05)
         return True
     except Exception as e:
         print(f"[Cursor] control_video_player error: {e}")

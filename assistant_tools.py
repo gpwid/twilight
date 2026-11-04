@@ -1346,7 +1346,7 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
             'Coordinates must be normalized integers 0-1000. If not visible on screen, return {"found": false, "guidance": "why not found"}.'
         )
 
-        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash"]
+        models_to_try = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite"]
 
         def call_coarse():
             for m in models_to_try:
@@ -1359,7 +1359,7 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
                         ],
                         config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
                     )
-                except Exception as me:
+                except Exception:
                     continue
             return None
 
@@ -1367,9 +1367,9 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(call_coarse)
-                resp1 = future.result(timeout=12.0)
+                resp1 = future.result(timeout=18.0)
         except Exception as ce:
-            print(f"[Grounding] Stage 1 coarse note: {ce}")
+            print(f"[Grounding] Stage 1 coarse note ({type(ce).__name__}): {ce}")
 
         if resp1 and resp1.text:
             raw1 = resp1.text.strip()
@@ -1386,6 +1386,16 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
                 guide = data1.get("guidance") or ""
 
                 if region and len(region) == 4:
+                    box_w = abs(region[3] - region[1])
+                    box_h = abs(region[2] - region[0])
+                    t_lower = target_description.lower()
+                    needs_fine_disambiguation = any(k in t_lower for k in ("pen", "pencil", "brush", "star", "polygon"))
+                    if not needs_fine_disambiguation and (box_w < 160 and box_h < 160):
+                        mid_px = int(((region[1] + region[3]) / 2.0 / 1000.0) * img_w)
+                        mid_py = int(((region[0] + region[2]) / 2.0 / 1000.0) * img_h)
+                        print(f"[Grounding] Fast Stage 1 pinpoint: {lbl} at ({mid_px}, {mid_py})")
+                        return mid_px, mid_py, lbl, guide
+
                     c_ymin = max(0, int((region[0] / 1000.0) * img_h) - 35)
                     c_xmin = max(0, int((region[1] / 1000.0) * img_w) - 35)
                     c_ymax = min(img_h, int((region[2] / 1000.0) * img_h) + 35)
@@ -1446,9 +1456,9 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
                     try:
                         with ThreadPoolExecutor(max_workers=1) as executor:
                             future = executor.submit(call_fine)
-                            resp2 = future.result(timeout=12.0)
+                            resp2 = future.result(timeout=18.0)
                     except Exception as fe:
-                        print(f"[Grounding] Stage 2 fine note: {fe}")
+                        print(f"[Grounding] Stage 2 fine note ({type(fe).__name__}): {fe}")
 
                     if resp2 and resp2.text:
                         raw2 = resp2.text.strip()
@@ -1514,59 +1524,18 @@ def locate_and_point_tool(tool_name: str, app_name: str = "") -> str:
     except Exception as e:
         return f"Error locating {tool_name}: {e}"
 
-def verify_screen_state_changed(before_img, center_x: int = None, center_y: int = None, radius: int = 100) -> bool:
-    """Closed-loop verification: compare screen state before and after action to verify UI reacted."""
-    try:
-        after_img = capture_screen_image()
-        if not before_img or not after_img:
-            return True
-        if before_img.size != after_img.size:
-            before_img = before_img.resize(after_img.size)
-        import numpy as np
-        if center_x is not None and center_y is not None:
-            w, h = before_img.size
-            x1 = max(0, center_x - radius)
-            y1 = max(0, center_y - radius)
-            x2 = min(w, center_x + radius)
-            y2 = min(h, center_y + radius)
-            b_crop = np.array(before_img.crop((x1, y1, x2, y2))).astype(float)
-            a_crop = np.array(after_img.crop((x1, y1, x2, y2))).astype(float)
-            diff = np.abs(a_crop - b_crop)
-            ratio = float(np.mean(diff > 15))
-            return ratio > 0.012
-        else:
-            diff = np.abs(np.array(after_img).astype(float) - np.array(before_img).astype(float))
-            ratio = float(np.mean(diff > 15))
-            return ratio > 0.008
-    except Exception as e:
-        print(f"[Verification] note: {e}")
-        return True
-
 def click_and_interact(target_name: str, action: str = "click") -> str:
-    """Move Twilight's custom hardware cursor to click, double-click, or interact with a window, tab, button, or control on screen with closed-loop verification."""
+    """Move Twilight's custom hardware cursor to click, double-click, or interact with a window, tab, button, or control on screen."""
     mark_action_tool_executed()
     try:
         # Universal Tab Close handler for active window (Chrome, Affinity, Figma, VS Code, etc.)
         if "tab" in target_name.lower():
             return close_tab()
 
-        # Capture pre-action screen state for closed-loop verification
-        before_img = capture_screen_image()
-
         x, y, label, guidance = ground_screen_element(target_name)
         if x is not None and y is not None:
             import cursor_assistant
             cursor_assistant.glide_hardware_cursor(x, y, action=action, glide_time=0.35)
-            time.sleep(0.25)
-
-            # Closed-loop verification
-            changed = verify_screen_state_changed(before_img, center_x=x, center_y=y)
-            if not changed and action == "click":
-                # Retry with slight dwell if initial click was swallowed during transition
-                time.sleep(0.12)
-                cursor_assistant.glide_hardware_cursor(x, y, action="click", glide_time=0.15)
-                changed = verify_screen_state_changed(before_img, center_x=x, center_y=y)
-
             return f"Done! I've moved my cursor and {action}ed {label} for you."
         return f"I couldn't locate {target_name} on your screen to click on it."
     except Exception as e:
@@ -1739,9 +1708,6 @@ def switch_to_tab(target: str) -> str:
         ok = cursor_assistant.switch_to_tab_or_window(target)
         if ok:
             return f"Switched over to {target} for you!"
-        if any(w in target.lower() for w in ("youtube", "livestream", "stream", "google", "wikipedia", "video", "news")):
-            cursor_assistant.browser_navigate_history("back")
-            return f"Navigated back toward {target} for you."
         return f"Could not find an open tab or window matching '{target}'."
     except Exception as e:
         return f"Error switching to tab: {e}"
