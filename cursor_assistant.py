@@ -883,18 +883,32 @@ def close_active_browser_tab(target_x: int = None, target_y: int = None):
                     tab_x = r[0] + min(w - 150, max(200, int(w * 0.25)))
                     tab_y = r[1] + 20
 
+            # Closed-loop pre-action capture
+            from assistant_tools import capture_screen_image, verify_screen_state_changed
+            before_tab_img = capture_screen_image()
+
             # 1. Visually glide Twilight's cursor right onto the active tab close button with click!
             glide_hardware_cursor(tab_x, tab_y, action="click", glide_time=0.30)
-            time.sleep(0.05)
+            time.sleep(0.12)
 
-            # 2. Re-assert foreground and dispatch Ctrl+W safety guarantee in case click was slightly off
-            force_foreground_window(fg)
-            time.sleep(0.03)
-            win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-            win32api.keybd_event(ord('W'), 0, 0, 0)
-            time.sleep(0.02)
-            win32api.keybd_event(ord('W'), 0, win32con.KEYEVENTF_KEYUP, 0)
-            win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+            # 2. Closed-loop verification: did the tab strip react / close?
+            tab_closed = verify_screen_state_changed(before_tab_img, center_x=tab_x, center_y=tab_y, radius=60)
+            if not tab_closed:
+                # Retry visual click once with short dwell
+                time.sleep(0.08)
+                glide_hardware_cursor(tab_x, tab_y, action="click", glide_time=0.15)
+                time.sleep(0.12)
+                tab_closed = verify_screen_state_changed(before_tab_img, center_x=tab_x, center_y=tab_y, radius=60)
+
+            # Only fallback to Ctrl+W if visual click did not close the tab
+            if not tab_closed:
+                force_foreground_window(fg)
+                time.sleep(0.03)
+                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+                win32api.keybd_event(ord('W'), 0, 0, 0)
+                time.sleep(0.02)
+                win32api.keybd_event(ord('W'), 0, win32con.KEYEVENTF_KEYUP, 0)
+                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
             return True
         except Exception as e:
             print(f"[Cursor] close_active_browser_tab error: {e}")
@@ -1184,6 +1198,8 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
             time.sleep(0.03)
             win32api.keybd_event(ord('F'), 0, win32con.KEYEVENTF_KEYUP, 0)
         elif act_lower in ("skip_ad", "skip_ads", "skip ad"):
+            from assistant_tools import capture_screen_image, verify_screen_state_changed
+            before_ad_img = capture_screen_image()
             skip_pos = None
             try:
                 from assistant_tools import ground_screen_element
@@ -1201,7 +1217,12 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
                 skip_pos = (skip_x, skip_y)
 
             glide_hardware_cursor(skip_pos[0], skip_pos[1], action="click", glide_time=0.30)
-            time.sleep(0.05)
+            time.sleep(0.15)
+            # Closed-loop verification: retry if ad button did not react
+            ad_skipped = verify_screen_state_changed(before_ad_img, center_x=skip_pos[0], center_y=skip_pos[1], radius=80)
+            if not ad_skipped:
+                time.sleep(0.10)
+                glide_hardware_cursor(skip_pos[0], skip_pos[1], action="click", glide_time=0.15)
         return True
     except Exception as e:
         print(f"[Cursor] control_video_player error: {e}")
