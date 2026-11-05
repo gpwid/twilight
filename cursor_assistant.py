@@ -226,7 +226,7 @@ def force_foreground_window(hwnd):
         print(f"[Cursor] force_foreground_window error: {e}")
 
 def get_spotify_window():
-    """Locate the main interactive Spotify window handle (Chrome_WidgetWin_1, w>=400, h>=300)."""
+    """Locate the main interactive Spotify window handle without ever unhiding blank background helper windows."""
     attach_desktop()
     if not win32gui:
         return None
@@ -234,8 +234,13 @@ def get_spotify_window():
     spotify_candidates = []
     def enum_sp(hwnd, _):
         try:
+            # CRITICAL: Only inspect visible windows (or minimized taskbar windows) with a real title!
+            if not win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd):
+                return True
             c = win32gui.GetClassName(hwnd)
             t = (win32gui.GetWindowText(hwnd) or "").strip()
+            if not t:
+                return True
             pname = ""
             if win32process and psutil:
                 try:
@@ -243,9 +248,11 @@ def get_spotify_window():
                     pname = psutil.Process(pid).name().lower()
                 except Exception:
                     pass
-            if "spotify" in pname:
-                if not any(k in c.lower() for k in ["ime", "tray", "session", "power", "gdi+"]):
-                    rect = win32gui.GetWindowRect(hwnd)
+            if "spotify" in pname and c == "Chrome_WidgetWin_1":
+                rect = win32gui.GetWindowRect(hwnd)
+                w = rect[2] - rect[0]
+                h = rect[3] - rect[1]
+                if win32gui.IsIconic(hwnd) or (w >= 400 and h >= 300):
                     spotify_candidates.append((hwnd, c, t, rect))
         except Exception:
             pass
@@ -258,26 +265,16 @@ def get_spotify_window():
 
     chosen_hwnd = None
     for hwnd, c, t, rect in spotify_candidates:
-        if c == "Chrome_WidgetWin_1":
+        if any(k in t.lower() for k in ["spotify", " - "]):
             chosen_hwnd = hwnd
             break
-        if any(k in t.lower() for k in ["spotify", "free", "premium"]):
-            chosen_hwnd = hwnd
-            break
-
     if not chosen_hwnd and spotify_candidates:
-        for hwnd, c, t, rect in spotify_candidates:
-            w = rect[2] - rect[0]
-            h = rect[3] - rect[1]
-            if w >= 400 and h >= 300:
-                chosen_hwnd = hwnd
-                break
+        chosen_hwnd = spotify_candidates[0][0]
 
     if chosen_hwnd:
         try:
             if win32gui.IsIconic(chosen_hwnd) or win32gui.GetWindowRect(chosen_hwnd)[0] <= -10000:
                 win32gui.ShowWindow(chosen_hwnd, win32con.SW_RESTORE)
-            win32gui.ShowWindow(chosen_hwnd, win32con.SW_SHOW)
         except Exception:
             pass
 
@@ -801,7 +798,7 @@ def search_and_play_spotify(query: str, search_x: int = None, search_y: int = No
                         art_data = json.loads(res_art.stdout)
                         artists = art_data.get("artists", [])
                         if artists and artists[0].get("name", "").lower() == clean_query.lower():
-                            if is_some_artist:
+                            if True:
                                 # Fetch diverse artist tracks and pick randomly for genuine variety
                                 res_atracks = subprocess.run([cli, "search", f"artist:{clean_query}", "--type", "track", "--format", "json", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0)
                                 if res_atracks.returncode == 0 and res_atracks.stdout.strip():

@@ -48,8 +48,12 @@ class MemoryManager:
         if not bullets:
             return ""
         
-        # Limit to top 15 facts to avoid prompt bloat
-        clipped = bullets[:15]
+        # Keep the first 3 core bullets + the 17 most recent bullets so new memories are never cut off!
+        if len(bullets) > 20:
+            clipped = bullets[:3] + bullets[-17:]
+        else:
+            clipped = bullets
+
         joined = "\n".join(clipped)
         return (
             "[RESEARCH JOURNAL & DURABLE MEMORIES:\n"
@@ -61,14 +65,17 @@ class MemoryManager:
         """Append a single verified fact to memories.md."""
         if not fact or not fact.strip():
             return
-        fact_str = fact.strip().lstrip("-* ").strip()
+        fact_str = fact.strip().lstrip("-*• ").strip()
+        if not fact_str:
+            return
         with self._lock:
             try:
                 content = self.memory_file.read_text(encoding="utf-8") if self.memory_file.exists() else ""
-                # Avoid duplicates
                 if fact_str.lower() in content.lower():
                     return
                 with open(self.memory_file, "a", encoding="utf-8") as f:
+                    if content and not content.endswith("\n"):
+                        f.write("\n")
                     f.write(f"- {fact_str}\n")
                 print(f"[MemoryManager] Recorded new memory: {fact_str}")
             except Exception as e:
@@ -77,19 +84,28 @@ class MemoryManager:
     def distill_turn_async(self, user_text: str, reply_text: str, client=None, model: str = "gemini-3.1-flash-lite"):
         """Background worker to check if user shared any new personal facts, music tastes, or habits."""
         def worker():
-            user_lower = user_text.lower()
-            # Fast heuristic check before calling model to save quota
-            triggers = ["i like ", "my favorite", "i prefer", "call me ", "i am ", "i work on ", "i'm studying", "i study"]
-            has_trigger = any(t in user_lower for t in triggers)
-            if not has_trigger:
+            user_lower = user_text.lower().strip()
+            triggers = (
+                "i like ", "i love ", "i hate ", "my favorite", "i prefer",
+                "call me ", "my name is ", "i am ", "i'm a ", "i work on ",
+                "i'm studying", "i study", "i live in ", "my birthday",
+                "remember that", "remember i ", "don't forget", "write down that"
+            )
+            if not any(t in user_lower for t in triggers):
+                return
+
+            # Fast zero-API path for explicit "remember that X" or "my name is X"
+            m_explicit = re.search(r'\b(?:remember\s+that|don\'t\s+forget\s+that)\s+(.+)', user_text, re.IGNORECASE)
+            if m_explicit and not client:
+                self.add_fact(f"User noted: {m_explicit.group(1).strip()}")
                 return
 
             if client:
                 try:
                     prompt = (
                         "Extract 1 concise bullet point of a durable fact or preference about the user from this dialogue turn.\n"
-                        "Only extract enduring facts (names, music taste, hobbies, occupation, pets, study subjects).\n"
-                        "If none, reply 'NONE'.\n"
+                        "Only extract enduring facts (name, music/media taste, hobbies, projects, pets, study subjects, birthday, location).\n"
+                        "If none or if it's just a temporary command, reply 'NONE'.\n"
                         f"User: {user_text}\n"
                         f"Assistant: {reply_text}"
                     )
@@ -98,7 +114,7 @@ class MemoryManager:
                         contents=prompt,
                     )
                     out = r.text.strip() if r and r.text else ""
-                    if out and "NONE" not in out.upper() and len(out) < 120:
+                    if out and "NONE" not in out.upper() and len(out) < 140:
                         self.add_fact(out)
                 except Exception:
                     pass

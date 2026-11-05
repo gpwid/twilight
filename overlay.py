@@ -506,62 +506,161 @@ class SciTwiOverlay:
         except Exception:
             pass
 
-    def _update_dynamic_study_state(self, dt: float):
-        """Dynamically detect active study windows (arXiv, Colab, Overleaf, IDEs) and manage Study Mode."""
+    def _is_spotify_or_browser_playing_audio(self) -> bool:
+        """Detect in <1ms if music/media is actively playing in Spotify or a browser/media player."""
+        # Don't mistake Twilight's own TTS voice for music playback
+        if getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn():
+            return self.state == "music"
+
+        # 1. Fast check: When Spotify Desktop is actively playing a track, its window title is "Artist - Track"
+        # When Spotify is paused, its window title reverts to "Spotify Free" / "Spotify Premium" / "Spotify"
+        media_window_open = False
+        if win32gui:
+            def _enum_media(hwnd, _):
+                nonlocal media_window_open
+                try:
+                    if not win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd):
+                        return True
+                    cls = win32gui.GetClassName(hwnd)
+                    title = (win32gui.GetWindowText(hwnd) or "").strip()
+                    if not title:
+                        return True
+                    t_low = title.lower()
+                    if cls == "Chrome_WidgetWin_1":
+                        # Active Spotify track title always has " - " and doesn't start with "spotify"
+                        if " - " in title and not t_low.startswith("spotify") and not any(
+                            b in t_low for b in ("google chrome", "microsoft edge", "brave", "visual studio", "discord")
+                        ):
+                            media_window_open = "SPOTIFY_PLAYING"
+                            return False
+                        if any(k in t_low for k in ("youtube", "soundcloud", "spotify", "music", "twitch", "netflix", "vlc")):
+                            media_window_open = True
+                except Exception:
+                    pass
+                return True
+            try:
+                win32gui.EnumWindows(_enum_media, None)
+            except Exception:
+                pass
+
+        if media_window_open == "SPOTIFY_PLAYING":
+            return True
+
+        # 2. Check Windows Core Audio Peak Meter for browser/system media playback (YouTube, SoundCloud, VLC, etc.)
+        if media_window_open:
+            try:
+                if not hasattr(self, "_audio_meter"):
+                    import comtypes.client
+                    from comtypes import GUID, IUnknown, COMMETHOD, HRESULT, CLSCTX_ALL
+                    from ctypes import c_float, POINTER, c_int, c_uint, byref
+
+                    class IAudioMeterInformation(IUnknown):
+                        _iid_ = GUID('{C02216F6-8C67-4B5B-9D00-D008E73E0064}')
+                        _methods_ = [
+                            COMMETHOD([], HRESULT, 'GetPeakValue', (['out'], POINTER(c_float), 'pfPeak')),
+                        ]
+
+                    class IMMDevice(IUnknown):
+                        _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
+                        _methods_ = [
+                            COMMETHOD([], HRESULT, 'Activate',
+                                      (['in'], POINTER(GUID), 'iid'),
+                                      (['in'], c_uint, 'dwClsCtx'),
+                                      (['in'], POINTER(c_int), 'pActivationParams'),
+                                      (['out'], POINTER(POINTER(IUnknown)), 'ppInterface')),
+                        ]
+
+                    class IMMDeviceEnumerator(IUnknown):
+                        _iid_ = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
+                        _methods_ = [
+                            COMMETHOD([], HRESULT, 'EnumAudioEndpoints'),
+                            COMMETHOD([], HRESULT, 'GetDefaultAudioEndpoint',
+                                      (['in'], c_int, 'dataFlow'),
+                                      (['in'], c_int, 'role'),
+                                      (['out'], POINTER(POINTER(IMMDevice)), 'ppEndpoint')),
+                        ]
+
+                    CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
+                    enumerator = comtypes.client.CreateObject(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator)
+                    endpoint = enumerator.GetDefaultAudioEndpoint(0, 1)
+                    iface = endpoint.Activate(byref(IAudioMeterInformation._iid_), CLSCTX_ALL, None)
+                    self._audio_meter = iface.QueryInterface(IAudioMeterInformation)
+
+                if self._audio_meter:
+                    peak = float(self._audio_meter.GetPeakValue())
+                    if peak > 0.003:
+                        self._last_audio_peak_time = time.time()
+                        return True
+                    # Small 2.0s grace buffer for quiet between-track gaps
+                    if time.time() - getattr(self, "_last_audio_peak_time", 0.0) < 2.0:
+                        return True
+            except Exception:
+                self._audio_meter = None
+
+        return False
+
+    def _get_ambient_context(self) -> tuple[str, str, str]:
+        """Determine (state, emotion, status_msg) dynamically from live music, active window, and user AFK time."""
+        # 1. If music/audio is playing on Spotify or browser, stay in music mode!
+        if self._is_spotify_or_browser_playing_audio():
+            return "music", "music", "Playing music"
+
+        # 2. Check user AFK time via Win32 GetLastInputInfo
         try:
-            fg_hwnd = win32gui.GetForegroundWindow()
-            if not fg_hwnd or not win32gui.IsWindow(fg_hwnd) or not win32gui.IsWindowVisible(fg_hwnd):
-                return
-            if fg_hwnd == self.hwnd:
-                return
-
-            title = win32gui.GetWindowText(fg_hwnd)
-            class_name = win32gui.GetClassName(fg_hwnd)
-            if not title or class_name in ("Progman", "WorkerW", "Shell_TrayWnd", "Windows.UI.Core.CoreWindow"):
-                return
-
-            title_lower = title.lower()
-            study_keywords = (
-                "arxiv", "scholar", "overleaf", "colab", "jupyter", "docs.", ".pdf",
-                "leetcode", "canvas", "blackboard", "moodle", "coursera", "edx",
-                "wikipedia", "visual studio", "code -", "cursor -", "pycharm", "sublime"
-            )
-            distraction_keywords = (
-                "youtube", "netflix", "twitch", "steam", "reddit", "twitter", "x.com", "tiktok", "discord"
-            )
-
-            is_study = any(k in title_lower for k in study_keywords)
-            is_distraction = any(k in title_lower for k in distraction_keywords)
-
-            if is_study:
-                self.study_dwell_seconds += dt
-                self.non_study_dwell_seconds = 0.0
-                if self.study_dwell_seconds >= 45.0 and not self.study_mode:
-                    self.study_mode = True
-                    self.study_session_start = time.time()
-                    self.status_message = "Studying"
-                    if self.state == "idle":
-                        self.current_emotion = "reading"
-                    print(f"[Overlay] Dynamic Study Mode engaged: '{title[:45]}...' (45s sustained focus)")
-                elif self.study_mode and self.state == "idle" and self.current_emotion != "reading":
-                    self.current_emotion = "reading"
-
-            elif is_distraction:
-                self.study_dwell_seconds = max(0.0, self.study_dwell_seconds - dt * 2.0)
-                if self.study_mode:
-                    self.non_study_dwell_seconds += dt
-                    if self.non_study_dwell_seconds >= 90.0:
-                        self.study_mode = False
-                        self.status_message = "Ready"
-                        if self.current_emotion == "reading":
-                            self.current_emotion = "idle"
-                        print("[Overlay] Dynamic Study Mode disengaged (distraction window active)")
-            else:
-                # Neutral window: gently decay study dwell counter if not locked in study mode
-                if not self.study_mode:
-                    self.study_dwell_seconds = max(0.0, self.study_dwell_seconds - dt * 0.5)
+            idle_ms = (win32api.GetTickCount() - win32api.GetLastInputInfo()) & 0xFFFFFFFF
+            idle_secs = idle_ms / 1000.0
+            if idle_secs >= 480.0:  # 8+ mins AFK -> sleeping
+                return "idle", "sleep", "Sleeping..."
+            elif idle_secs >= 240.0:  # 4+ mins AFK -> tired
+                return "idle", "tired", "Getting sleepy..."
         except Exception:
             pass
+
+        # 3. Inspect active foreground window to match what the user is doing
+        try:
+            fg_hwnd = win32gui.GetForegroundWindow()
+            if fg_hwnd and fg_hwnd != self.hwnd and win32gui.IsWindowVisible(fg_hwnd):
+                title_lower = (win32gui.GetWindowText(fg_hwnd) or "").lower()
+                study_keywords = (
+                    "arxiv", "scholar", "overleaf", "colab", "jupyter", "docs.", ".pdf",
+                    "leetcode", "canvas", "blackboard", "moodle", "coursera", "edx",
+                    "wikipedia", "visual studio", "code -", "cursor -", "pycharm", "sublime", "notepad", "obsidian"
+                )
+                creative_or_tech_keywords = (
+                    "photoshop", "affinity", "figma", "gimp", "blender", "illustrator",
+                    "premiere", "davinci", "after effects", "aseprite", "task manager", "powershell", "terminal"
+                )
+                if any(k in title_lower for k in study_keywords) or getattr(self, "study_mode", False):
+                    return "idle", "reading", "Studying"
+                if any(k in title_lower for k in creative_or_tech_keywords):
+                    return "idle", "analyzing", "Co-piloting"
+        except Exception:
+            pass
+
+        return "idle", "idle", "Listening"
+
+    def restore_ambient_state(self):
+        """Transition smoothly to whatever ambient state matches the user's live desktop & audio."""
+        st, emo, msg = self._get_ambient_context()
+        self.set_state(st, status_msg=msg, emotion=emo)
+
+    def _update_dynamic_study_state(self, dt: float):
+        """Poll live music, active app, and AFK state every 1.0s when not actively in input/thinking/speaking."""
+        now = time.time()
+        if now - getattr(self, "_last_ambient_poll", 0.0) < 1.0:
+            return
+        self._last_ambient_poll = now
+
+        # Do not override while user is typing, waiting on LLM, or reading an active speech bubble
+        if self.show_input or self.state == "thinking" or self.show_response:
+            return
+        if getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn():
+            return
+
+        st, emo, msg = self._get_ambient_context()
+        self.study_mode = (emo == "reading")
+        if st != self.state or emo != self.current_emotion:
+            self.set_state(st, status_msg=msg, emotion=emo)
 
     def set_state(self, state: str, status_msg: str = "", emotion: str = ""):
         """Update companion state, status message, and facial expression."""
@@ -600,7 +699,6 @@ class SciTwiOverlay:
             if not emotion and tag_emo in self.expressions:
                 emotion = tag_emo
 
-        # Clean LaTeX math formatting so speech and cards show natural typography
         sub_map = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉', '+': '⁺', '-': '⁻'}
         def _clean_latex(m):
             s = m.group(1)
@@ -630,11 +728,11 @@ class SciTwiOverlay:
         self.set_state("speaking", status_msg="Twilight speaking...", emotion=emotion)
 
     def dismiss_response(self):
-        """Dismiss the on-screen speech bubble."""
+        """Dismiss the on-screen speech bubble and transition to live ambient state (music, reading, analyzing, or idle)."""
         if getattr(self, "is_processing", False):
-            return  # Protect against premature dismissal while background request/tool is running
+            return
         self.show_response = False
-        self.set_state("idle")
+        self.restore_ambient_state()
 
     def summon(self):
         """Summon companion window to top and open input box immediately."""
@@ -789,7 +887,7 @@ class SciTwiOverlay:
                 self.input_text = ""
                 self.cursor_pos = 0
                 self.selection_active = False
-                self.state = "idle"
+                self.restore_ambient_state()
                 self.status_message = "Ready"
 
         if time.time() - self.last_cursor_toggle > 0.5:
@@ -890,7 +988,7 @@ class SciTwiOverlay:
                             else:
                                 self.show_input = False
                                 self.selection_active = False
-                                self.state = "idle"
+                                self.restore_ambient_state()
                         elif self.show_response and not resp_card_rect.collidepoint(mx, my):
                             if not getattr(self, "is_processing", False):
                                 self.dismiss_response()
@@ -929,7 +1027,7 @@ class SciTwiOverlay:
                     if event.key == pygame.K_ESCAPE:
                         self.show_input = False
                         self.selection_active = False
-                        self.state = "idle"
+                        self.restore_ambient_state()
                     elif event.key == pygame.K_RETURN:
                         if self.input_text.strip():
                             submitted = self.input_text.strip()

@@ -12,10 +12,11 @@ import shutil
 import random
 import json
 import winreg
-from PIL import ImageGrab
+from PIL import Image, ImageGrab
 import httpx
 from bs4 import BeautifulSoup
 import html
+import difflib
 
 try:
     import win32api
@@ -341,92 +342,67 @@ def get_search_directories() -> list[str]:
             res.append(d)
     return res
 
+import difflib
+
+def _fuzzy_score(query_str: str, candidate_str: str) -> float:
+    """Compute similarity score (0.0 - 1.0) between a user query and a live OS process/window/shortcut name."""
+    q = re.sub(r'[\s\-_]+', '', query_str.lower()).replace('.exe', '')
+    c = re.sub(r'[\s\-_]+', '', candidate_str.lower()).replace('.exe', '')
+    if not q or not c:
+        return 0.0
+    if q == c:
+        return 1.0
+    if len(q) >= 3 and (q in c or c in q):
+        return 0.92
+    # Also check word-by-word fuzzy match for multi-word window titles
+    ratio = difflib.SequenceMatcher(None, q, c).ratio()
+    for word in re.split(r'[\s\-_]+', candidate_str.lower()):
+        w_clean = word.replace('.exe', '')
+        if len(w_clean) >= 3:
+            ratio = max(ratio, difflib.SequenceMatcher(None, q, w_clean).ratio())
+    return ratio
+
 def open_app(app_name: str) -> str:
-    """Launch a Windows application by name (e.g. 'vscode', 'spotify', 'chrome', 'discord', 'notepad', 'calc').
-    
-    IMPORTANT: ONLY call this when the user explicitly commands to open, launch, or start an application.
-    NEVER call this when the user is casually asking a question, opinion, or experience (e.g. 'Have you played X?', 'Do you know X?', 'What is X?')."""
+    """Dynamically launch any installed Windows application by name or fuzzy match."""
     mark_action_tool_executed()
     try:
         global _LAST_APP
-        clean = re.sub(r'^(?:up\s+|the\s+|an?\s+)', '', app_name.strip().lower()).strip()
+        clean = re.sub(r'^(?:up\s+|the\s+|an?\s+|my\s+)', '', app_name.strip().lower()).strip()
         _LAST_APP = clean
 
-        # 1. Direct system built-in commands and aliases
-        direct_commands = {
-            "calculator": "calc", "calc": "calc",
-            "notepad": "notepad",
-            "paint": "mspaint",
-            "cmd": "start cmd",
-            "terminal": "start wt",
-            "powershell": "start pwsh", "pwsh": "start pwsh",
-            "explorer": "explorer", "files": "explorer",
-            "vscode": "code", "vs code": "code", "visual studio code": "code",
-            "youtube": "https://www.youtube.com",
-            "google": "https://www.google.com",
-            "reddit": "https://www.reddit.com",
-            "github": "https://www.github.com",
-            "twitter": "https://twitter.com",
-        }
-        if clean in direct_commands:
-            target = direct_commands[clean]
-            if target.startswith("http"):
-                os.startfile(target)
-                print(f"[Tools] Opened link: {clean}")
-                return f"Successfully opened {clean} in browser."
-            if target == "code":
-                code_bin = shutil.which("code") or shutil.which("code.cmd")
-                if code_bin:
-                    subprocess.Popen([code_bin])
-                    print(f"[Tools] Opened VS Code via PATH: {code_bin}")
-                    return "Successfully opened Visual Studio Code."
-            subprocess.Popen(target, shell=True)
-            print(f"[Tools] Opened system app: {clean}")
-            return f"Successfully opened {clean}."
-
-        # 2. Spotify focus
-        if "spotify" in clean:
-            if is_process_running("Spotify.exe"):
-                try:
-                    os.startfile("spotify:")
-                    return "Spotify is already running and brought to focus."
-                except Exception:
-                    pass
-
-        # 3. Check direct PATH (shutil.which)
+        # 1. Check direct PATH (shutil.which)
         which_path = shutil.which(clean) or shutil.which(f"{clean}.exe")
         if which_path:
-            try:
-                subprocess.Popen([which_path])
-                print(f"[Tools] Launched app via PATH: {which_path}")
-                return f"Successfully opened {clean}."
-            except Exception:
-                pass
+            subprocess.Popen([which_path])
+            return f"Successfully opened {clean}."
 
-        # 4. Check Windows Registry App Paths (HKCU & HKLM)
+        # 2. Check Windows Registry App Paths (exact + fuzzy)
+        best_reg_path = None
+        best_reg_score = 0.0
         for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
             try:
                 k = winreg.OpenKey(root_key, r"Software\Microsoft\Windows\CurrentVersion\App Paths")
                 num_subkeys = winreg.QueryInfoKey(k)[0]
                 for i in range(num_subkeys):
                     sub = winreg.EnumKey(k, i)
-                    sub_clean = sub.lower()
-                    if clean in sub_clean or sub_clean.startswith(clean) or clean in sub_clean.replace(".exe", ""):
+                    score = _fuzzy_score(clean, sub)
+                    if score > best_reg_score:
                         sub_k = winreg.OpenKey(k, sub)
                         exe_path, _ = winreg.QueryValueEx(sub_k, None)
                         exe_path = os.path.expandvars(exe_path.strip('"'))
                         if os.path.exists(exe_path):
-                            os.startfile(exe_path)
-                            print(f"[Tools] Launched app via App Paths registry: {exe_path}")
-                            return f"Successfully opened {clean}."
+                            best_reg_score = score
+                            best_reg_path = exe_path
             except Exception:
                 pass
 
-        # 5. Search Desktop, Start Menu, Programs, Taskbar (.lnk, .url, .exe)
-        search_dirs = get_search_directories()
-        clean_tokens = [tok for tok in re.split(r'[\s\-_]+', clean) if tok]
+        if best_reg_path and best_reg_score >= 0.78:
+            os.startfile(best_reg_path)
+            return f"Successfully opened {os.path.basename(best_reg_path)}."
 
-        matched_files = []
+        # 3. Dynamically scan Desktop, Start Menu, Programs, and Taskbar shortcuts (exact + fuzzy)
+        search_dirs = get_search_directories()
+        candidates = []
         for d in search_dirs:
             for root, _, files in os.walk(d):
                 for f in files:
@@ -434,41 +410,33 @@ def open_app(app_name: str) -> str:
                     if ext not in (".lnk", ".url", ".exe"):
                         continue
                     fname_no_ext = os.path.splitext(f)[0].lower()
-                    if clean in fname_no_ext or (clean_tokens and all(tok in fname_no_ext for tok in clean_tokens)):
-                        matched_files.append(os.path.join(root, f))
+                    score = _fuzzy_score(clean, fname_no_ext)
+                    if score >= 0.74:
+                        ext_priority = 0 if ext == ".lnk" else (1 if ext == ".url" else 2)
+                        candidates.append((score, -ext_priority, os.path.join(root, f), fname_no_ext))
 
-        if matched_files:
-            matched_files.sort(key=lambda p: 0 if p.lower().endswith(".lnk") else (1 if p.lower().endswith(".url") else 2))
-            target_path = matched_files[0]
+        if candidates:
+            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            best_score, _, target_path, matched_name = candidates[0]
             try:
                 os.startfile(target_path)
-                print(f"[Tools] Launched app via shortcut: {target_path}")
-                return f"Successfully opened {clean}."
             except Exception:
                 subprocess.Popen(["explorer.exe", target_path])
-                return f"Successfully opened {clean}."
+            return f"Successfully opened {matched_name}."
 
-        # 6. Protocol URI scheme
-        known_protocols = ("spotify", "discord", "steam", "slack", "zoommtg", "skype")
-        if clean in known_protocols:
-            try:
-                os.startfile(f"{clean}:")
-                print(f"[Tools] Launched app via protocol: {clean}:")
-                return f"Successfully opened {clean}."
-            except Exception:
-                pass
+        # 4. Try URI protocol or Windows shell execution directly
+        try:
+            subprocess.Popen(f"start {clean}", shell=True)
+            return f"Launched {clean}."
+        except Exception:
+            pass
 
-        # 7. Not found anywhere
-        print(f"[Tools] App '{app_name}' not found on system.")
-        return f"Could not find '{app_name}' installed on this computer. Searched Desktop, Start Menu, App Paths, Programs, and PATH."
+        return f"Could not find '{app_name}' installed on this computer."
     except Exception as e:
-        print(f"[Tools] Failed to open {app_name}: {e}")
         return f"Failed to open {app_name}: {e}"
 
 def close_app(app_name: str) -> str:
-    """Close or terminate an active Windows application or window by name (e.g. 'gimp', 'affinity photo', 'spotify', 'chrome', 'discord', 'notepad', 'calculator', 'vscode', 'task manager').
-    
-    IMPORTANT: ONLY call this when the user explicitly instructs to close, quit, exit, terminate, or kill an app, or asks to close/kill an app via Task Manager."""
+    """Dynamically close or terminate any running Windows application or window by exact or fuzzy name match."""
     global _LAST_APP
     mark_action_tool_executed()
     try:
@@ -476,284 +444,124 @@ def close_app(app_name: str) -> str:
         if not clean:
             return "Please specify which application to close."
 
-        # Tab close protection: never kill browser processes when user asks to close a tab
         user_q = get_current_user_query().lower()
         if "tab" in user_q or "tab" in clean:
             return close_tab()
 
-        # Handle phrases mentioning task manager as a mechanism (e.g. "close gimp from task manager", "kill it using task manager")
+        # Strip "on/in/from/via/using task manager" mechanism phrases
         if "task manager" in clean or "taskmgr" in clean:
-            stripped = re.sub(r'\b(from|using|with|via|in|the)\s+task\s*manager\b', '', clean).strip()
-            if stripped and stripped not in ["it", "that", "this"]:
-                clean = stripped
-            elif any(k in clean for k in ["task manager", "taskmanager", "taskmgr"]):
-                clean = "task manager"
+            stripped = re.sub(r'\b(?:from|using|with|via|in|on|through|by)?\s*(?:the\s+)?task\s*(?:manager|mgr)\b', '', clean).strip()
+            clean = stripped if (stripped and stripped not in ["it", "that", "this", "close", "kill", "quit", "exit"]) else "taskmgr"
 
-        # Strip leading action verbs if full command was passed
-        clean = re.sub(r'^(close|quit|exit|terminate|kill|shut\s+down)\s+', '', clean)
-        # Strip generic fillers
-        clean = re.sub(r'^(the|a|an)\s+', '', clean)
-        clean = re.sub(r'\s+(app|application|window|program|process)$', '', clean).strip()
+        clean = re.sub(r'^(?:close|quit|exit|terminate|kill|end|shut\s+down)\s+(?:the\s+|my\s+)?', '', clean)
+        clean = re.sub(r'^(?:the|a|an)\s+', '', clean)
+        clean = re.sub(r'\s+(?:app|application|window|program|process)$', '', clean).strip()
 
-        # Pronoun resolution (e.g. "close it", "close that", "close the app")
         if clean in ["it", "that", "this", "app", "the app", "program"] and _LAST_APP:
             clean = _LAST_APP
 
-        # Common executable alias mappings
-        app_aliases = {
-            "spotify": ["spotify.exe"],
-            "discord": ["discord.exe"],
-            "chrome": ["chrome.exe"],
-            "google chrome": ["chrome.exe"],
-            "firefox": ["firefox.exe"],
-            "edge": ["msedge.exe"],
-            "msedge": ["msedge.exe"],
-            "brave": ["brave.exe"],
-            "opera": ["opera.exe"],
-            "vivaldi": ["vivaldi.exe"],
-            "notepad": ["notepad.exe"],
-            "calculator": ["calculatorapp.exe", "calc.exe"],
-            "calc": ["calculatorapp.exe", "calc.exe"],
-            "paint": ["mspaint.exe"],
-            "vscode": ["code.exe"],
-            "vs code": ["code.exe"],
-            "visual studio code": ["code.exe"],
-            "code": ["code.exe"],
-            "terminal": ["windowsterminal.exe", "wt.exe"],
-            "powershell": ["powershell.exe", "pwsh.exe"],
-            "cmd": ["cmd.exe"],
-            "steam": ["steam.exe", "steamwebhelper.exe"],
-            "task manager": ["taskmgr.exe"],
-            "taskmanager": ["taskmgr.exe"],
-            "taskmgr": ["taskmgr.exe"],
-            "word": ["winword.exe"],
-            "excel": ["excel.exe"],
-            "powerpoint": ["powerpnt.exe"],
-            "gimp": ["gimp-3.exe", "gimp-2.10.exe", "gimp.exe", "script-fu.exe", "gimp-console.exe", "gimp-debug-tool.exe"],
-            "affinity": ["photo.exe", "designer.exe", "publisher.exe", "affinity.exe", "affinityphoto.exe", "affinitydesigner.exe", "affinitypublisher.exe"],
-            "affinity photo": ["photo.exe", "affinityphoto.exe", "affinity.exe"],
-            "affinity designer": ["designer.exe", "affinitydesigner.exe", "affinity.exe"],
-            "affinity publisher": ["publisher.exe", "affinitypublisher.exe", "affinity.exe"],
-            "photoshop": ["photoshop.exe"],
-            "illustrator": ["illustrator.exe"],
-            "premiere": ["adobe premiere pro.exe"],
-            "blender": ["blender.exe"],
-            "vlc": ["vlc.exe"],
-            "obs": ["obs64.exe", "obs32.exe", "obs.exe"],
-            "war thunder": ["aces.exe", "launcher.exe", "warthunder.exe"],
-            "warthunder": ["aces.exe", "launcher.exe", "warthunder.exe"],
-            "figma": ["figma.exe"],
+        is_force = bool(re.search(r'\b(kill|force|terminate|crash|task\s*manager)\b', app_name.lower() + " " + user_q))
+
+        # Protected system processes we must never fuzzy-match and kill
+        protected_procs = {
+            'system', 'registry', 'smss.exe', 'csrss.exe', 'wininit.exe', 'services.exe',
+            'lsass.exe', 'winlogon.exe', 'dwm.exe', 'explorer.exe', 'svchost.exe',
+            'conhost.exe', 'sihost.exe', 'taskhostw.exe', 'runtimebroker.exe', 'python.exe'
         }
 
-        # Check browser identity upfront to safeguard session state
-        is_browser = any(b in clean for b in ("chrome", "google chrome", "firefox", "edge", "msedge", "browser", "brave", "opera", "vivaldi"))
-        is_force = bool(re.search(r'\b(kill|force|terminate|crash)\b', app_name.lower()))
-
-        target_names = set(app_aliases.get(clean, []))
         target_pids = set()
-
-        # 1. Scan running processes: identify primary matching processes and trace parent/child tree
-        clean_no_space = clean.replace(" ", "")
-        try:
-            import psutil
-            for p in psutil.process_iter(['pid', 'name', 'exe']):
-                try:
-                    p_name = p.info['name'].lower()
-                    p_exe = (p.info['exe'] or '').lower()
-
-                    # Protect Edge WebView2 background runtime when targeting Edge browser
-                    if "msedgewebview2" in p_name and "webview" not in clean:
-                        continue
-
-                    matched = (
-                        p_name in target_names or
-                        clean == p_name or
-                        clean == p_name.replace(".exe", "") or
-                        (len(clean) >= 3 and clean in p_name) or
-                        (len(clean_no_space) >= 3 and clean_no_space in p_name.replace("-", "").replace("_", "")) or
-                        (p_exe and clean in p_exe) or
-                        ("affinity" in clean and ("photo.exe" in p_name or "designer.exe" in p_name or "publisher.exe" in p_name or "affinity" in p_exe or "serif" in p_exe)) or
-                        ("gimp" in clean and ("gimp" in p_name or "script-fu" in p_name or "gimp" in p_exe))
-                    )
-                    if matched:
-                        target_pids.add(p.info['pid'])
-                        target_names.add(p_name)
-                        # Identify all child instances (e.g. plugins, renderers, script engines)
-                        try:
-                            for child in p.children(recursive=True):
-                                target_pids.add(child.pid)
-                                target_names.add(child.name().lower())
-                        except Exception:
-                            pass
-                        # Identify parent instance (e.g. project launcher or splash screen)
-                        try:
-                            parent = p.parent()
-                            if parent and parent.pid > 4:
-                                par_name = parent.name().lower()
-                                par_exe = (parent.exe() or '').lower()
-                                if any(k in par_name or k in par_exe for k in [clean, "affinity", "gimp", "warthunder", "steam", "launcher"]):
-                                    target_pids.add(parent.pid)
-                                    target_names.add(par_name)
-                        except Exception:
-                            pass
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except Exception as e:
-            print(f"[Tools] Process scanning error: {e}")
-
-        # 2. Scan visible top-level windows: capture secondary windows, project launchers, or splash screens
+        target_names = set()
         target_hwnds = set()
-        try:
-            import win32gui
-            import win32process
-            import win32con
+        matched_display_name = clean
 
-            def enum_cb(hwnd, _):
+        # 1. Dynamically scan all visible windows first (matches human-readable titles like "Snipping Tool")
+        if win32gui and win32process:
+            def enum_win_cb(hwnd, _):
+                nonlocal matched_display_name
                 try:
                     if win32gui.IsWindowVisible(hwnd):
-                        title = win32gui.GetWindowText(hwnd).strip().lower()
-                        cls = win32gui.GetClassName(hwnd).lower()
+                        title = (win32gui.GetWindowText(hwnd) or "").strip()
+                        if not title or title in ("Program Manager", "Settings"):
+                            return True
                         _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                        
-                        # Match window by title/class or associated PID
-                        title_match = bool(title and (clean in title or any(t.replace(".exe", "") in title for t in target_names)))
-                        class_match = bool(any(k in cls for k in [clean, "gimp", "chrome_widgetwin", "affinity"]))
-                        pid_match = bool(pid in target_pids)
-
-                        if pid_match or title_match or class_match:
-                            if pid > 4:
-                                target_pids.add(pid)
+                        score = _fuzzy_score(clean, title)
+                        if score >= 0.74 and pid > 4:
+                            target_hwnds.add(hwnd)
+                            target_pids.add(pid)
+                            matched_display_name = title
+                            if psutil:
                                 try:
-                                    proc = psutil.Process(pid)
-                                    target_names.add(proc.name().lower())
-                                    for ch in proc.children(recursive=True):
+                                    p = psutil.Process(pid)
+                                    if p.name().lower() not in protected_procs:
+                                        target_names.add(p.name().lower())
+                                    for ch in p.children(recursive=True):
                                         target_pids.add(ch.pid)
                                 except Exception:
                                     pass
-                            target_hwnds.add(hwnd)
                 except Exception:
                     pass
                 return True
-
             try:
-                win32gui.EnumWindows(enum_cb, None)
+                win32gui.EnumWindows(enum_win_cb, None)
             except Exception:
                 pass
-        except Exception as e:
-            print(f"[Tools] Window scan error: {e}")
 
-        if not target_pids and not target_names and not target_hwnds:
-            return f"Could not find an active window or process for '{app_name}' to close."
-
-        # 3. Phase 1: Graceful Exit Signal
-        # For Chrome and web browsers: send WM_CLOSE and WM_SYSCOMMAND to all top-level windows to save active sessions cleanly.
-        # NEVER use an abrupt force-kill command on Chrome.
-        closed_windows = 0
-        try:
-            for hwnd in list(target_hwnds):
+        # 2. Dynamically scan all running processes (matches process names & exe paths with fuzzy typo tolerance)
+        if psutil:
+            for p in psutil.process_iter(['pid', 'name', 'exe']):
                 try:
-                    if win32gui.IsWindow(hwnd):
-                        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-                        win32gui.PostMessage(hwnd, win32con.WM_SYSCOMMAND, win32con.SC_CLOSE, 0)
-                        closed_windows += 1
-                except Exception:
+                    p_name = (p.info['name'] or '').lower()
+                    if not p_name or p_name in protected_procs or ("msedgewebview2" in p_name and "webview" not in clean):
+                        continue
+                    p_exe_stem = os.path.splitext(os.path.basename(p.info['exe'] or ''))[0].lower()
+                    score = max(_fuzzy_score(clean, p_name), _fuzzy_score(clean, p_exe_stem))
+                    if score >= 0.76:
+                        target_pids.add(p.info['pid'])
+                        target_names.add(p_name)
+                        if matched_display_name == clean:
+                            matched_display_name = p.info['name']
+                        for child in p.children(recursive=True):
+                            target_pids.add(child.pid)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-        except Exception as e:
-            print(f"[Tools] WM_CLOSE graceful signal error: {e}")
 
-        # Wait loop for clean exit (browsers need up to 4s to flush session state, sqlite db, cookies, tabs)
-        wait_timeout = 0.5 if is_force else (4.5 if is_browser else 1.8)
+        if not target_pids and not target_hwnds:
+            return f"Could not find an active window or running process matching '{app_name}'."
+
+        is_browser = any(b in n for n in target_names for b in ("chrome", "firefox", "msedge", "brave", "opera", "vivaldi"))
+
+        # Phase 1: Graceful WM_CLOSE signal to windows
+        for hwnd in list(target_hwnds):
+            try:
+                if win32gui.IsWindow(hwnd):
+                    win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+
+        wait_timeout = 0.4 if is_force else (3.5 if is_browser else 1.2)
         t_end = time.time() + wait_timeout
         while time.time() < t_end:
-            alive_pids = [p for p in target_pids if psutil.pid_exists(p)]
-            if not alive_pids:
+            if not [p for p in target_pids if psutil.pid_exists(p)]:
                 break
-            time.sleep(0.25)
+            time.sleep(0.2)
 
-        # 4. Phase 2: Complete Termination for Non-Browser Apps
-        # For applications with multi-processes, secondary windows, launchers, or splash screens (like GIMP or Affinity Photo):
-        # Terminate all remaining parent and child instances completely.
+        # Phase 2: Force tree-kill remaining processes if not a gentle browser close
         if not is_browser or is_force:
-            alive_pids = [p for p in target_pids if psutil.pid_exists(p)]
-            if alive_pids:
-                for pid in alive_pids:
-                    try:
-                        # Terminate child instances first, then parent instance
-                        p = psutil.Process(pid)
-                        for child in p.children(recursive=True):
-                            try:
-                                child.kill()
-                            except Exception:
-                                pass
-                        try:
-                            p.kill()
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-                    # Tree-kill via Windows taskkill (/T terminates specified process and any child processes)
-                    try:
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace")
-                    except Exception:
-                        pass
-
-                # Terminate any remaining processes by executable image name
-                for name in list(target_names):
-                    if is_process_running(name):
-                        try:
-                            subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, text=True, encoding="utf-8", errors="replace")
-                        except Exception:
-                            pass
-                time.sleep(0.4)
-
-        # 5. Phase 3: Verification of Full Shutdown Before Reporting Success
-        remaining_pids = [p for p in target_pids if psutil.pid_exists(p)]
-        remaining_names = [n for n in target_names if is_process_running(n)]
-        
-        # Verify active windows are completely closed
-        remaining_windows = []
-        try:
-            def verify_cb(hwnd, _):
+            for pid in [p for p in target_pids if psutil.pid_exists(p)]:
                 try:
-                    if win32gui.IsWindowVisible(hwnd):
-                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                        w_title = win32gui.GetWindowText(hwnd).strip()
-                        r = win32gui.GetWindowRect(hwnd)
-                        w_dim = r[2] - r[0]
-                        h_dim = r[3] - r[1]
-                        if w_dim > 100 and h_dim > 100:
-                            if pid in target_pids or (w_title and clean in w_title.lower()):
-                                remaining_windows.append(f"{w_title or 'Window'} (PID {pid})")
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=2.0)
                 except Exception:
                     pass
-                return True
-
-            try:
-                win32gui.EnumWindows(verify_cb, None)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[Tools] Post-close window verification note: {e}")
+            for name in list(target_names):
+                if is_process_running(name):
+                    try:
+                        subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, timeout=2.0)
+                    except Exception:
+                        pass
 
         _LAST_APP = clean
-        app_disp = clean.title() if clean else app_name.title()
-
-        # Check if shutdown was completely verified
-        if not remaining_pids and not remaining_names and not remaining_windows:
-            print(f"[Tools] Successfully verified complete shutdown of {app_name}: 0 processes, 0 windows remaining.")
-            if is_browser:
-                return f"Successfully closed {app_disp} (active session and tabs saved cleanly)."
-            return f"Successfully closed {app_disp}."
-        
-        # If still running: report the true state accurately rather than merely reporting success
-        if is_browser:
-            print(f"[Tools] Browser {app_name} still active after graceful signal (tabs/session preserved).")
-            return f"{app_disp} is still open (waiting on an unsaved tab or confirmation dialog; session preserved without force-kill)."
-        else:
-            print(f"[Tools] App {app_name} termination incomplete: pids={remaining_pids}, names={remaining_names}, windows={remaining_windows}")
-            return f"{app_disp} could not be completely closed (some background processes or windows remain active)."
+        return f"Successfully closed {matched_display_name}."
     except Exception as e:
-        print(f"[Tools] Error closing {app_name}: {e}")
         return f"Failed to close {app_name}: {e}"
 
 def parse_timestamp_ms(ts: str) -> int:
@@ -872,29 +680,24 @@ def ensure_spotify_running():
             time.sleep(2.0)
 
 def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> str:
-    """Search and play a song, artist, album, or track on Spotify.
-    
-    IMPORTANT: ONLY call this when the user explicitly asks to play or queue music.
-    Do NOT call this when the user is casually asking about music taste, opinions, or favorite bands.
-    
-    Args:
-        query: Song name, artist, or query (e.g. 'north by clairo', 'jeff buckley', 'random song').
-        timestamp: Optional timestamp to start playback from (e.g. '1:30', '45s', '2 minutes').
-        is_random: If True (or if 'random'/'shuffle' is in query), picks a random match from the results.
-    """
+    """Search and play a song, artist, album, or track on Spotify."""
     mark_action_tool_executed()
     try:
+        no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         clean = query.strip()
         if not clean or clean.lower() in ("play", "resume", "unpause", "music", "song", "a song", "some music"):
             return control_spotify("play")
 
-        if not is_random and re.search(r'\b(?:random|shuffle|any)\b', clean, re.IGNORECASE):
+        # Detect if user is asking for an artist generally ("play kendrick lamar", "play a song from kendrick lamar")
+        is_artist_request = bool(re.search(
+            r'\b(?:random|shuffle|any|some|a\s+song\s+(?:by|from)|songs?\s+(?:by|from)|music\s+(?:by|from)|something\s+(?:by|from))\b',
+            query, re.IGNORECASE
+        ))
+        if is_artist_request:
             is_random = True
         
-        # Detect if user is asking for an alternative, different, or original version
         wants_alt = bool(re.search(r'\b(?:other|different|another|alternative|alternate|original|album|live|acoustic|remix|not this|switch|change)\b', clean, re.IGNORECASE))
 
-        # Detect inline timestamp if present
         ts_match = re.search(r'\b(?:at|from)\s+(\d+:\d+|\d+\s*(?:m|min|s|sec|seconds?))\b', clean, re.IGNORECASE)
         if ts_match and not timestamp:
             timestamp = ts_match.group(1)
@@ -904,34 +707,22 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
         clean = re.sub(r'\s+on spotify$', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'\b(?:from\s+(?:any\s+)?(?:one\s+of\s+)?(?:my\s+)?playlists?)\b', '', clean, flags=re.IGNORECASE)
         clean = re.sub(r'\b(?:the\s+)?(?:other|different|another|alternative|alternate|original|album)\s+versions?\s+(?:of\s+)?\b', '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r'\b(?:random|shuffle|any|some|songs? by|songs?|tracks?)\b', '', clean, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'\b(?:random|shuffle|any|some|songs?\s+(?:by|from)|a\s+song\s+(?:by|from)|songs?|tracks?)\b', '', clean, flags=re.IGNORECASE).strip()
         clean = re.sub(r'^(?:by|from)\s+', '', clean, flags=re.IGNORECASE).strip()
         clean = re.sub(r'\s+', ' ', clean).strip()
 
-        # Route playlist requests directly to play_playlist
         if "playlist" in query.lower() or "playlist" in clean.lower():
             return play_playlist(clean or query)
         pl_uri, pl_name = find_user_playlist(clean)
         if pl_uri:
             return play_playlist(pl_name)
 
-        # Trigger Capri-style visual cursor automation asynchronously for sub-100ms tool response
-        try:
-            import cursor_assistant
-            import threading
-            threading.Thread(target=cursor_assistant.search_and_play_spotify, args=(clean,), daemon=True).start()
-            return f"Playing '{clean}' on Spotify! I've searched for it and clicked play with my cursor."
-        except Exception as ce:
-            print(f"[Tools] cursor_assistant visual spotify error: {ce}")
-
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
-        ensure_spotify_running()
-
         if os.path.exists(cli):
-            # Special case: user asked for a completely random song (no artist specified)
+            ensure_spotify_running()
             if is_random and not clean:
                 try:
-                    lib_res = subprocess.run([cli, "library", "list", "--type", "playlist", "--limit", "25", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0)
+                    lib_res = subprocess.run([cli, "library", "list", "--type", "playlist", "--limit", "25", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win)
                     if lib_res.returncode == 0 and lib_res.stdout.strip():
                         lib_data = json.loads(lib_res.stdout)
                         valid_pls = [p for p in lib_data.get("items", []) if p.get("uri") and p.get("name")]
@@ -939,16 +730,14 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
                             chosen_pl = random.choice(valid_pls)
                             pl_uri = chosen_pl["uri"]
                             pl_name = chosen_pl["name"]
-                            pget = subprocess.run([cli, "playlist", "get", pl_uri, "--limit", "25", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0)
+                            pget = subprocess.run([cli, "playlist", "get", pl_uri, "--limit", "25", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win)
                             if pget.returncode == 0 and pget.stdout.strip():
                                 pdata = json.loads(pget.stdout)
                                 tracks = pdata.get("tracks", [])
                                 if tracks:
                                     chosen_track = random.choice(tracks)
                                     target_uri = chosen_track["uri"]
-                                    print(f"[Tools] Playing random track '{chosen_track.get('name')}' from user playlist '{pl_name}'...")
-                                    subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0)
-                                    os.startfile(target_uri)
+                                    subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
                                     meta = get_track_metadata(target_uri)
                                     t_name = meta.get("name") or chosen_track.get("name", "Unknown Track")
                                     t_artist = meta.get("artist") or ", ".join(chosen_track.get("artists", []))
@@ -963,20 +752,30 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
                 clean = "top hits"
 
             try:
-                # Always fetch multiple tracks so alternative versions exist when requested
-                limit = "15" if is_random else "10"
-                res = subprocess.run([cli, "search", clean, "--type", "track", "--limit", limit], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5)
+                # Check if `clean` is an artist name (e.g. "kendrick lamar", "clairo")
+                # If it matches an artist name and no specific song was named, pick a random track from their catalog!
+                res_art = subprocess.run([cli, "search", clean, "--type", "artist", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+                if res_art.returncode == 0 and res_art.stdout.strip():
+                    try:
+                        art_data = json.loads(res_art.stdout)
+                        artists = art_data.get("artists", [])
+                        if artists and artists[0].get("name", "").lower() == clean.lower():
+                            is_random = True
+                    except Exception:
+                        pass
+
+                search_q = f"artist:{clean}" if is_random and " by " not in clean.lower() else clean
+                res = subprocess.run([cli, "search", search_q, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
                 matches = re.findall(r'(.*?)\s+(spotify:track:[a-zA-Z0-9]+)', res.stdout)
                 
                 if not matches:
-                    res = subprocess.run([cli, "search", clean, "--limit", limit], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5)
-                    matches = re.findall(r'(.*?)\s+(spotify:(?:track|album|artist|playlist):[a-zA-Z0-9]+)', res.stdout)
+                    res = subprocess.run([cli, "search", clean, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
+                    matches = re.findall(r'(.*?)\s+(spotify:track:[a-zA-Z0-9]+)', res.stdout)
 
                 if matches:
-                    # Check currently playing track to avoid replaying the same version when switching
                     curr_uri = ""
                     try:
-                        np_res = subprocess.run([cli, "now-playing", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.2)
+                        np_res = subprocess.run([cli, "now-playing", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.2, creationflags=no_win)
                         if np_res.returncode == 0 and np_res.stdout.strip():
                             np_data = json.loads(np_res.stdout)
                             curr_uri = np_data.get("uri") or np_data.get("item", {}).get("uri", "")
@@ -987,26 +786,16 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
                         valid_pool = [m for m in matches if m[1] != curr_uri] or matches
                         picked_title, target_uri = random.choice(valid_pool)
                     elif wants_alt or (curr_uri and matches[0][1] == curr_uri):
-                        # Filter out the currently playing track to get the requested alternate version
                         alt_pool = [m for m in matches if m[1] != curr_uri]
-                        if alt_pool:
-                            if re.search(r'\b(?:original|album)\b', query, re.IGNORECASE):
-                                clean_titles = [m for m in alt_pool if not re.search(r'[-–—]\s*(?:recorded at|live|acoustic|remix|edit|session)', m[0], re.IGNORECASE)]
-                                picked_title, target_uri = clean_titles[0] if clean_titles else alt_pool[0]
-                            else:
-                                picked_title, target_uri = alt_pool[0]
-                        else:
-                            picked_title, target_uri = matches[0]
+                        picked_title, target_uri = alt_pool[0] if alt_pool else matches[0]
                     else:
                         picked_title, target_uri = matches[0]
                     
                     picked_title = picked_title.strip()
-
                     print(f"[Tools] Playing Spotify URI '{target_uri}' ({picked_title})...")
-                    subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0)
-                    os.startfile(target_uri)
+                    subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+                    subprocess.run([cli, "navigate", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
 
-                    # Lookup rich metadata (artist, album, release year)
                     meta = get_track_metadata(target_uri)
                     t_name = meta.get("name") or picked_title
                     t_artist = meta.get("artist") or ""
@@ -1023,21 +812,29 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
                             return f"'{t_name}' is only {dur_str} long, so {timestamp} is past the end of the song! Playing from the beginning instead."
                         else:
                             time.sleep(0.35)
-                            subprocess.run([cli, "seek", str(req_ms)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0)
+                            subprocess.run([cli, "seek", str(req_ms)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
                             return f"Playing '{t_name}'{artist_str}{album_str} on Spotify starting at {timestamp}."
 
-                    prefix = "Playing randomly selected song:" if is_random else "Playing"
-                    return f"{prefix} '{t_name}'{artist_str}{album_str} on Spotify."
+                    return f"Playing '{t_name}'{artist_str}{album_str} on Spotify."
             except Exception as e:
                 print(f"[Tools] spotify_cli error: {e}")
 
-        # Fallback search URI
+        # Visual cursor automation fallback when spotify_cli is not present
+        try:
+            import cursor_assistant
+            import threading
+            threading.Thread(target=cursor_assistant.search_and_play_spotify, args=(clean,), daemon=True).start()
+            return f"Playing '{clean}' on Spotify! I've searched for it and clicked play with my cursor."
+        except Exception as ce:
+            print(f"[Tools] cursor_assistant visual spotify error: {ce}")
+
         encoded = urllib.parse.quote(clean or "top hits")
         os.startfile(f"spotify:search:{encoded}")
         return f"Searching and playing '{clean}' on Spotify."
     except Exception as e:
         print(f"[Tools] play_spotify error: {e}")
         return f"Failed to play '{query}' on Spotify: {e}"
+    
 def get_now_playing() -> str:
     """Get information about the currently playing track on Spotify (title, artist, album, release year, duration)."""
     try:
@@ -1178,9 +975,13 @@ def play_playlist(name: str = "") -> str:
             ensure_spotify_running()
             subprocess.run([cli, "play", user_uri], capture_output=True, timeout=1.8)
             subprocess.run([cli, "navigate", user_uri], capture_output=True, timeout=1.8)
+            details = get_playlist_details(user_uri)
+            desc_str = f" (Description: \"{details['description']}\")" if details.get("description") else ""
+            tracks_str = f" — Featuring tracks: {', '.join(details['sample_tracks'][:3])}" if details.get("sample_tracks") else ""
             import cursor_assistant
-            cursor_assistant.play_spotify_playlist_with_cursor(user_name or clean)
-            return f"Playing your playlist '{user_name or clean}' on Spotify! I've glided to it and pressed play with my cursor."
+            import threading
+            threading.Thread(target=cursor_assistant.play_spotify_playlist_with_cursor, args=(user_name or clean,), daemon=True).start()
+            return f"Playing user playlist '{user_name or clean}'{desc_str}{tracks_str} on Spotify!"
 
         clean = re.sub(r'^(?:(?:play|open|put on)\s+)?(?:one of\s+)?(?:my\s+)?playlists?\s*', '', clean, flags=re.IGNORECASE).strip()
         import cursor_assistant
@@ -1675,7 +1476,7 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
             'Coordinates must be normalized integers 0-1000. If not visible on screen, return {"found": false, "guidance": "why not found"}.'
         )
 
-        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash"]
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it"]
 
         def call_coarse():
             for m in models_to_try:

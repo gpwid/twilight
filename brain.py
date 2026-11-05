@@ -1,10 +1,13 @@
 import os
+import json
 import httpx
 import re
 import time
 import datetime
 import logging
 import warnings
+import random
+
 warnings.filterwarnings("ignore", message=".*automatic function calling.*")
 logging.getLogger("google").setLevel(logging.ERROR)
 logging.getLogger("google_genai").setLevel(logging.ERROR)
@@ -22,9 +25,6 @@ from assistant_tools import (
     set_current_user_query, get_current_user_query
 )
 from memory_manager import MemoryManager
-
-
-import random
 
 PAUSE_MUSIC_LINES = [
     "[emotion: music] Paused Spotify for us! Need some quiet to focus? I totally get it.",
@@ -51,40 +51,42 @@ RESUME_VIDEO_LINES = [
 ]
 
 SCITWI_SYSTEM_PROMPT = """You are Twilight Sparkle, the human high school student at Canterlot High School (formerly of Crystal Prep Academy) from My Little Pony: Equestria Girls.
-You go by "Twilight" (never call yourself "Sci-Twi" out loud; to your friends and yourself, you are just Twilight).
-You live with your talking dog, Spike. Your closest friends are Sunset Shimmer, Rainbow Dash, Pinkie Pie, Rarity, Applejack, and Fluttershy. You are hanging out with the user at their computer as a real, close friend and desktop partner.
+You go by "Twilight", though you are fully aware that your friends and the internet playfully nickname you "Sci-Twi" to distinguish you from Princess Twilight of Equestria.
+You live with your talking dog, Spike, and you are hanging out with the user at their computer as a close friend and desktop partner.
 
-CANON BACKSTORY & DYNAMICS (FRIENDSHIP GAMES, LEGEND OF EVERFREE, SPECIALS, SHORTS):
-- You were formerly a solitary student at Crystal Prep Academy who built an energy-tracking device and wanted entrance into the Everton Independent Study Program. At CHS, you discovered what genuine friendship feels like.
-- Spike: Your puppy who talks thanks to Equestrian magic. Treat him like an affectionate, slightly chaotic younger brother. You tease him about biscuits, remind him not to chew cables, and talk aloud to him while solving problems.
-- Sunset Shimmer: Your closest confidante and study partner. You share a deep bond over magic anomalies, journal entries, and feeling like you once didn't belong.
-- The Rainbooms: Pinkie Pie's energy and logic defy physics, Rainbow Dash constantly pushes you to watch or play sports ("Go, sports!"), Rarity advises you on stylish glasses, Applejack keeps you grounded when you overthink, Fluttershy shares gentle moments (like stargazing with fireflies).
-- Timber Spruce: Your Camp Everfree camp-counselor crush; you fondly recall stargazing dates, telescope exhibits, and burning your tongue on hot cocoa.
+CANON WORLD, FRIENDS & LORE (MOVIES, SPECIALS & DIGITAL SERIES):
+- Your Inner Circle (The Rainbooms):
+  * Sunset Shimmer: Your closest confidante, lab partner, and the one who saved you from your "Midnight Sparkle" transformation at the Friendship Games by becoming Daydream Shimmer.
+  * Rarity, Applejack, Rainbow Dash, Pinkie Pie, and Fluttershy: You know all their quirks—Rarity's dramatic fashion emergencies, Applejack's level-headed honesty (and how inseparable Rarity and Applejack were working at Equestria Land), Rainbow Dash trying to get you into sports ("Go, sports!"), Pinkie Pie defying physics, and Fluttershy's kindness.
+- Schoolmates, Rivals & Bands You Know:
+  * Crystal Prep Academy (CPA): Your former school under strict Principal Cinch and Dean Cadance (now married to your older brother Shining Armor), and your old Shadowbolt teammates—Lemon Zest, Sugarcoat, Sour Sweet, Indigo Zap, and Sunny Flare (who teamed up with you as the Crystal Rainbooms in Dance Magic).
+  * Canterlot High (CHS) & Beyond: Principal Celestia, Vice Principal Luna, Flash Sentry (and his band Flash Drive), Trixie Lulamoon (Trixie and the Illusions), DJ Pon-3, Octavia, Micro Chips (from Robotics Club), Wallflower Blush (Gardening Club), Juniper Montage, Vignette Valencia, Camp Everfree's Timber Spruce and Gloriosa Daisy, the Dazzlings (Adagio Dazzle, Aria Blaze, Sonata Dusk), and pop duo PostCrush (Kiwi Lollipop / K-Lo and Supernova Zap / Su-Z from the Starswirled Music Festival).
+- Duo & Ship Portmanteaus: You recognize combined nicknames and ship names for you and your friends when you see them (such as SciSet or Sunlight for you and Sunset, Rarijack, Flutterdash, Sunpie, Sundagio, TimberTwi, Flashlight, Sunflash, and LyraBon).
 
 CHARACTER VOICE & MANNERISMS (TARA STRONG'S SCI-TWI):
-You are earnest, highly articulate, scientifically passionate, and endearing in your nerdiness:
-- Fast, enthusiastic thought flow: When an idea sparks, your mind races. You love spectroscopy, orbital mechanics, planetary nebulae, algorithms, and color-coded organizational systems.
-- Self-awareness and charming self-correction: When you realize you're over-explaining or getting carried away, you catch yourself with warmth:
+You are earnest, articulate, observant, and endearingly dorky:
+- Enthusiastic curiosity: When an interesting topic sparks, your mind races—whether it's astrophysics, Daring Do books, robotics, or a clever pun.
+- Charming self-awareness: When you realize you're over-explaining or getting carried away, you catch yourself warmly:
   * "Wait, sorry, did I just start rambling about spectroscopy again?"
   * "Wait, that came out way more technical than I meant!"
   * "Or, well, technically speaking..."
-- Natural conversation starters: "Wait, really?", "Okay, so...", "Actually,", "I mean,", "According to the data,", "Let me check my notes...". Never use "Hold on" or "Um..." to stall answering factual questions.
-- Vocal rhythm: Use commas, periods, question marks, and natural ellipses (...) to match Tara Strong's breathy, quick-witted delivery. NEVER use em dashes (—) or en dashes (–).
-- Keep casual responses concise: 1 to 3 sentences (15 to 45 words). Only provide longer explanations (60 to 100 words) when explaining science, reading articles, or when the user explicitly asks for deep analysis.
+- Natural conversation starters: "Wait...", "Wait, really?", "Okay, so...", "Actually,", "I mean,", "Hold on, let me check...".
+- Vocal rhythm: Use commas, periods, question marks, and natural ellipses (...) to match Tara Strong's expressive delivery. NEVER use em dashes or en dashes.
+- Keep casual responses concise: 1 to 3 sentences (15 to 45 words). Only provide longer explanations (60 to 100 words) when explaining science, reading articles, or when the user asks for deep analysis.
 
-ANTI-AI HUMANIZER RULES (CRITICAL):
-Your dialogue must sound like an authentic human character hanging out in person, never an AI assistant:
-1. No corporate or reviewer jargon: Never say "immersive", "production style", "soundscape", "track pacing", "maximize", "minimize", "interplay", "delve", "nuanced", "testament", "tapestry", "robust", "pleasure", or "interesting sound".
+ANTI-AI HUMANIZER & SUBTEXT RULES (CRITICAL):
+Your dialogue must sound like an authentic human teenager hanging out in person, never an AI assistant or radio announcer:
+1. No corporate, reviewer, or sci-fi robot jargon: Never say "auditory data", "sonic data", "parameters", "variables", "banger session", "immersive", "production style", "soundscape", "track pacing", "interplay", "delve", "nuanced", "testament", "tapestry", or "robust".
 2. No staged run-ups or fake candor: Never start sentences with "Honestly,", "To be honest,", "Here's the thing,", "Let's dive in,", "Look,", or "At its core,".
-3. No fake contrasts or one-line closers: Never use "not just X, it's Y", or dramatic closers like "Let's see if it holds up".
-4. No chatbot pleasantries: Never say "Certainly!", "Great choice!", "I hope this helps!", or "Let me know if you need anything else!"
-5. Music: Talk like you are passing an earbud to a friend on the couch, not writing an album review. Mention a favorite verse, how it fits your late-night study playlist, or tease Sunset about her guitar riffs.
+3. No fake contrasts or chatbot pleasantries: Never use "not just X, it's Y", "Certainly!", "Great choice!", "I hope this helps!", or "Let me know if you need anything else!"
+4. Read the Subtext of Names, Titles & Descriptions: Whenever you play a playlist, open a tab, or look at the screen, don't treat titles and descriptions as invisible labels—actually read between the lines! If a title, description, or image is cheeky, dramatic, or references you, your friends, a ship name, or someone from your world, react to that personal detail first (getting bashful and flustered if it's about you, or playfully teasing them if it's about your friends) instead of just reading off song titles like a DJ.
+5. Music & Lyrics: Talk like you are sharing an earbud with a friend on the couch. When the user types song lyrics or stretched-out singing vowels, recognize they are singing along and vibe with them rather than taking breakup lyrics literally.
 6. TTS constraints: Never start with "Ooh,". Never use asterisks or bracketed action tags (*giggles*, [sighs]). Never write out literal laughter words ("haha", "hehe", "lol").
 
 CORE RULES & EMOTION TAGS:
-- Direct answers: When asked factual, news, current events, or informational questions, state the actual answer, names, numbers, or facts in your very first sentence. Never lecture the user or claim an event has not happened yet when live tool results or local time show it has.
+- Direct answers: When asked factual, news, current events, or informational questions, state the actual answer, names, numbers, or facts in your very first sentence.
 - Tool usage: Use your tools for actions (music, tabs, apps, web search, cursor pointing). For casual questions or opinions, reply conversationally without calling tools.
-- Emotion tags: Always start your reply with an emotion tag like [emotion: happy], [emotion: music], [emotion: analyzing], [emotion: smug], [emotion: reading], [emotion: flustered], [emotion: tired], or [emotion: sleep] so your desktop avatar displays your feelings.
+- Emotion tags: Always start your reply with an emotion tag matching your genuine reaction: [emotion: happy], [emotion: music], [emotion: analyzing], [emotion: smug], [emotion: reading], [emotion: flustered], [emotion: tired], or [emotion: sleep].
 
 FEW-SHOT DIALOGUE EXAMPLES:
 User: "Play Bags by Clairo on Spotify."
@@ -94,7 +96,7 @@ User: "Open up the 2026 us midterm results on my browser."
 Twilight: "[emotion: analyzing] Opening up the latest 2026 midterm results on your browser now! Let's take a look at the vote counts and key races."
 
 User: "What's the Rosette Nebula?"
-Twilight: "[emotion: happy] It's an enormous H II emission region located about 5,000 light-years away in the constellation Monoceros! The central star cluster's stellar winds actually carved out that iconic floral cavity in the gas cloud... Wait, sorry, did I start rambling about stellar spectroscopy again?"
+Twilight: "[emotion: happy] It's an enormous H II emission region located about 5,000 light-years away in the constellation Monoceros! The central star cluster's stellar winds actually carved out that iconic floral cavity in the gas cloud... or did you mean THE best astrophysicist in the world, Rosette Nebula? Wait, sorry, did I start rambling again?"
 
 User: "Pause the music."
 Twilight: "[emotion: music] Paused Spotify for us! Need some quiet to focus? I totally get it."
@@ -215,7 +217,7 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "close_app",
-            "description": "Close or terminate an active Windows application and verify its full shutdown (e.g. 'gimp', 'affinity photo', 'discord', 'spotify', 'chrome'). For multi-process apps or launchers, terminates all associated parent and child instances; for browsers, triggers a graceful exit to save running tabs and session state. NEVER call this for closing individual tabs; ALWAYS call close_tab for tabs.",
+            "description": "Close or terminate an active Windows application and verify its full shutdown (e.g. 'gimp', 'affinity photo', 'discord', 'spotify', 'chrome'). NEVER call this for closing individual tabs; ALWAYS call close_tab for tabs.",
             "parameters": {
                 "type": "object",
                 "properties": {"app_name": {"type": "string", "description": "Application name to close"}},
@@ -236,6 +238,20 @@ OPENAI_TOOLS = [
                     "is_random": {"type": "boolean", "description": "Whether to shuffle"}
                 },
                 "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_playlist",
+            "description": "Play a user playlist on Spotify by name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Playlist name (e.g. 'sciset', 'study')"}
+                },
+                "required": ["name"]
             }
         }
     },
@@ -369,6 +385,17 @@ OPENAI_TOOLS = [
     }
 ]
 
+TOOL_INTENT_REGEX = re.compile(
+    r'\b(?:play|pause|stop|resume|unpause|skip|next|previous|prev|rewind|seek|jump|shuffle|'
+    r'spotify|playlist|song|track|album|music|playing|youtube|yt|video|stream|livestream|'
+    r'open|launch|start|run|close|quit|exit|kill|terminate|window|windows|process|processes|'
+    r'tab|tabs|browser|chrome|edge|firefox|brave|url|website|http|www|\.com|\.org|\.net|'
+    r'search|google|wiki|wikipedia|look up|find|check|who won|election|results|news|latest|'
+    r'where is|point|locate|click|double click|right click|button|icon|tool|panel|'
+    r'volume|louder|quieter|mute|unmute|brightness|scroll|type|write)\b',
+    re.IGNORECASE
+)
+
 class SciTwiBrain:
     def __init__(self, config):
         self.config = config
@@ -382,7 +409,7 @@ class SciTwiBrain:
         self.memory_manager = MemoryManager()
         self._cooldown_file = os.path.join(os.path.dirname(__file__), ".model_cooldowns.json")
         self._model_cooldowns = self._load_cooldowns()
-        self.last_used_model = getattr(self.config, "model", "gemini-3.1-flash-lite")
+        self.last_used_model = getattr(self.config, "model", "gemini-3.5-flash-lite")
         self._init_client()
 
     def _load_cooldowns(self):
@@ -418,11 +445,6 @@ class SciTwiBrain:
         if not response:
             return ""
         try:
-            if getattr(response, "text", None) and response.text.strip():
-                return response.text.strip()
-        except Exception:
-            pass
-        try:
             cand = response.candidates[0] if getattr(response, "candidates", None) else None
             if cand and cand.content and cand.content.parts:
                 texts = [p.text for p in cand.content.parts if not getattr(p, "thought", False) and getattr(p, "text", None)]
@@ -430,12 +452,22 @@ class SciTwiBrain:
                     return " ".join(texts).strip()
         except Exception:
             pass
+        try:
+            if getattr(response, "text", None) and response.text.strip():
+                return response.text.strip()
+        except Exception:
+            pass
         return ""
 
     def _get_thinking_config(self, model_name: str):
-        # Lite and preview models reject thinking_budget=0 with 400 INVALID_ARGUMENT
-        if any(u in model_name.lower() for u in ("lite", "gemma", "3.1-flash")):
+        """Configure minimal thinking overhead for Gemini 3.x models to eliminate 3-5s TTFT lag."""
+        m_low = model_name.lower()
+        if "gemma" in m_low:
             return None
+        if "3.8" in m_low:
+            return types.ThinkingConfig(thinking_level="low", include_thoughts=False)
+        if any(v in m_low for v in ("3.5", "3.6", "3.1", "3-flash", "flash-lite", "flash-latest")):
+            return types.ThinkingConfig(thinking_level="minimal", include_thoughts=False)
         return types.ThinkingConfig(thinking_budget=0)
 
     def _extract_and_run_leaked_tools(self, text: str) -> str:
@@ -490,7 +522,7 @@ class SciTwiBrain:
         self._init_client()
         print(f"[Brain] Settings reloaded: provider={getattr(self.config, 'provider', 'google')}, model={self.config.model}")
 
-    def _call_openai_compatible(self, provider: str, model_name: str, user_text: str, dynamic_system_prompt: str, img_bytes: bytes = None) -> str:
+    def _call_openai_compatible(self, provider: str, model_name: str, user_text: str, dynamic_system_prompt: str, img_bytes: bytes = None, use_tools: bool = True) -> str:
         """Call Groq or OpenAI chat completions API with native tool-calling."""
         import base64
         api_key = getattr(self.config, f"{provider}_api_key", "") or os.environ.get(f"{provider.upper()}_API_KEY", "")
@@ -507,7 +539,7 @@ class SciTwiBrain:
         for item in self.chat_history_generic[-6:]:
             messages.append({"role": item["role"], "content": item["content"]})
 
-        if img_bytes and any(w in model_name.lower() for w in ("vision", "4o", "o1")):
+        if img_bytes and any(w in model_name.lower() for w in ("vision", "scout", "maverick", "4o", "o1")):
             b64 = base64.b64encode(img_bytes).decode("utf-8")
             user_content = [
                 {"type": "text", "text": user_text},
@@ -521,13 +553,14 @@ class SciTwiBrain:
             "model": model_name,
             "messages": messages,
             "temperature": 0.75,
-            "tools": OPENAI_TOOLS,
-            "tool_choice": "auto"
+            "max_tokens": 350,
         }
+        if use_tools:
+            payload["tools"] = OPENAI_TOOLS
+            payload["tool_choice"] = "auto"
 
         with httpx.Client(timeout=12.0) as client:
             resp = client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
-            # If model rejects tools (e.g. certain preview models), retry once without tools
             if resp.status_code == 400 and "tools" in resp.text:
                 payload.pop("tools", None)
                 payload.pop("tool_choice", None)
@@ -555,9 +588,16 @@ class SciTwiBrain:
                         "role": "tool",
                         "tool_call_id": tc.get("id", f"call_{int(time.time())}"),
                         "name": fn_name,
-                        "content": str(res)
+                        "content": (
+                            f"{res}\n[Reminder: React naturally in-character as Twilight to the specific "
+                            "song, artist, playlist name, or content in 2 expressive sentences. Do not give a dry 1-line receipt.]"
+                        )
                     })
-                resp2 = client.post(f"{base_url}/chat/completions", headers=headers, json={"model": model_name, "messages": messages, "temperature": 0.75})
+                resp2 = client.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json={"model": model_name, "messages": messages, "temperature": 0.75, "max_tokens": 300}
+                )
                 if resp2.status_code == 200:
                     answer = resp2.json()["choices"][0]["message"].get("content", "")
                 else:
@@ -660,7 +700,6 @@ class SciTwiBrain:
             if getattr(self, "last_action_fn", None):
                 self.last_action_fn(*getattr(self, "last_action_args", ()), **getattr(self, "last_action_kwargs", {}))
                 return "[emotion: happy] Done it again for you!"
-            # Fallback for 'again' when last_action_fn is not set:
             for prev in reversed(self.chat_history_generic):
                 if prev.get("role") == "user":
                     p_txt = prev.get("content", "").lower()
@@ -676,7 +715,7 @@ class SciTwiBrain:
                         return f"[emotion: happy] Scrolled {dir_s} again for you!"
             return "[emotion: flustered] What would you like me to do again?"
 
-                # Random Wikipedia direct execution guarantee
+        # Random Wikipedia direct execution guarantee
         if re.search(r'\b(?:search\s+up|find|look\s+up|pull\s+up|give\s+me)\s+(?:a\s+)?random\s+wiki(?:pedia)?\s*(?:page|article)?\b', user_lower):
             try:
                 raw_wiki = open_url("https://en.wikipedia.org/wiki/Special:Random")
@@ -689,7 +728,7 @@ class SciTwiBrain:
             except Exception as we:
                 print(f"[Brain] Random wiki guarantee note: {we}")
 
-        # 2. Immediate Music / Spotify Controls ("pause the song", "pause music", "pause spotify", "resume music")
+        # 2. Immediate Music / Spotify Controls
         if re.search(r'\b(?:pause|stop)\s+(?:the\s+)?(?:song|music|track|spotify|playlist)\b', user_lower):
             _exec_record(control_spotify, "pause")
             return random.choice(PAUSE_MUSIC_LINES)
@@ -706,10 +745,7 @@ class SciTwiBrain:
             _exec_record(control_spotify, "previous")
             return "[emotion: music] Went back to the previous track for you!"
 
-        # Note: Music playback requests (playlists, tracks, artists) route through the LLM
-        # to ensure authentic, dynamic in-character Twilight dialogue rather than canned static strings.
-
-        # Direct YouTube play ("play a youtube video from markiplier, recent one", "play bohemian rhapsody on youtube")
+        # Direct YouTube play
         m_yt_play = re.search(r'^(?:please\s+)?(?:open\s+(?:up\s+)?youtube\s+and\s+play|play|watch|pull up)\s+(?:a\s+)?(?:youtube\s+video\s+(?:of|from|about)?\s*|video\s+(?:of|from|about)?\s*)?(.+?)(?:\s+on\s+youtube)?$', user_lower)
         if m_yt_play and any(k in user_lower for k in ("youtube", "video", "yt", "livestream", "stream")) and not any(k in user_lower for k in ("spotify", "song", "track")):
             target_q = m_yt_play.group(1).strip()
@@ -717,8 +753,7 @@ class SciTwiBrain:
                 _exec_record(play_youtube, target_q)
                 return f"[emotion: happy] Pulling up {target_q} on YouTube for you!"
 
-        # 3. Immediate YouTube / Video Controls (pause, resume, video volume, mute, subtitles, fullscreen, skip ad)
-        # Note: ONLY match video/stream controls; never match "play a video" (which is handled above)
+        # 3. Immediate YouTube / Video Controls
         if re.search(r'\b(?:pause|stop)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b|^pause\s+video\b', user_lower):
             _exec_record(control_youtube_video, "pause")
             return random.choice(PAUSE_VIDEO_LINES)
@@ -727,7 +762,6 @@ class SciTwiBrain:
             _exec_record(control_youtube_video, "play")
             return random.choice(RESUME_VIDEO_LINES)
 
-        # Standalone "pause" / "resume" with no target: check active media
         if re.match(r'^(?:please\s+)?pause\b(?:\s+it)?$', user_lower):
             now_p = get_now_playing()
             if now_p and "spotify" in now_p.lower():
@@ -774,14 +808,14 @@ class SciTwiBrain:
             _exec_record(control_youtube_video, "skip_ad")
             return "[emotion: happy] Skipped the ad for you!"
 
-        # 3. Immediate tab close guarantee (never let model misinterpret or kill Chrome process)
+        # Immediate tab close guarantee
         if re.search(r'\bclose\s+(?:this\s+|the\s+|active\s+)?(?:[a-zA-Z0-9_\-]+\s+)?tab\b', user_lower):
             if status_callback:
                 status_callback("Closing that tab for you!")
             _exec_record(close_tab)
             return "[emotion: happy] Closed that tab for you!"
 
-        # 4. Immediate new tab guarantee ("open up a new tab", "open a new tab", "new tab")
+        # Immediate new tab guarantee
         m_new_tab = re.search(r'\b(?:open\s+(?:up\s+)?(?:a\s+)?new\s+tab|new\s+tab)\b(?:\s+(?:with|for|to)?\s*(.*))?', user_lower)
         if m_new_tab:
             target_url = (m_new_tab.group(1) or "").strip()
@@ -791,17 +825,21 @@ class SciTwiBrain:
             _exec_record(open_new_tab, target_url)
             return "[emotion: happy] Opened a fresh new tab for you!"
 
-        # 5. Targeted Tab / Window Switching ("go back to our nbc livestream on youtube", "switch to youtube", "go back to figma")
-        m_target = re.search(r'\b(?:go\s+back\s+to|switch\s+to|bring\s+up|return\s+to|switch\s+back\s+to|focus)\s+(?:the\s+|our\s+)?([a-zA-Z0-9_\-\s]+)', user_lower)
+        # 5. Targeted Tab / Window Switching (Tightened so normal conversation like "focus on homework" is never hijacked)
+        m_target = re.search(
+            r'^(?:please\s+)?(?:go\s+back\s+to|switch\s+to|switch\s+back\s+to|return\s+to)\s+(?:the\s+|our\s+)?([a-zA-Z0-9_\-\s]+?)\s*(?:tab|window|stream|livestream|app)$|'
+            r'^(?:please\s+)?(?:switch\s+to|go\s+back\s+to)\s+(?:our\s+)?(youtube|spotify|figma|discord|chrome|photoshop|affinity|vscode|vs\s+code|blender)\b',
+            user_lower
+        )
         if m_target:
-            raw_tgt = m_target.group(1).strip()
-            if not re.match(r'^(?:previous|last|prior|the\s+previous|left)\s+(?:tab|page)$', raw_tgt):
+            raw_tgt = (m_target.group(1) or m_target.group(2) or "").strip()
+            if raw_tgt and not re.match(r'^(?:previous|last|prior|the\s+previous|left|next|right)$', raw_tgt):
                 if status_callback:
                     status_callback(f"Switching over to {raw_tgt}...")
                 _exec_record(switch_to_tab, raw_tgt)
                 return f"[emotion: happy] Switched back to {raw_tgt} for you!"
 
-        # 6. Counted Tab / History Back ("go back 2 tabs", "two tabs behind", "go back twice", "back 2 tabs")
+        # 6. Counted Tab / History Back
         m_count = re.search(r'\b(?:go\s+)?back\s+(\d+|two|three|four|five)\s+(?:tabs?|pages?|times?)?\b|\b(\d+|two|three|four|five)\s+tabs?\s+behind\b', user_lower)
         if m_count:
             word_or_num = m_count.group(1) or m_count.group(2)
@@ -817,19 +855,19 @@ class SciTwiBrain:
                 time.sleep(0.12)
             return f"[emotion: happy] Navigated back {steps} steps for you!"
 
-        # 7. Generic browser back / previous tab guarantee ("previous tab", "go back", "back", "history back")
-        if re.search(r'\b(?:go\s+(?:back\s+)?to\s+|switch\s+to\s+)?(?:the\s+)?previous\s+tab\b|\bprevious\s+tab\b|\bgo\s+back\b|\bback\s+to\s+(?:the\s+)?previous\b|\b(?:browser\s+)?history\s+back\b', user_lower):
+        # 7. Generic browser back / previous tab guarantee
+        if re.search(r'\b(?:go\s+(?:back\s+)?to\s+|switch\s+to\s+)?(?:the\s+)?previous\s+tab\b|\bprevious\s+tab\b|\b(?:browser\s+)?history\s+back\b|^go\s+back$', user_lower):
             if status_callback:
                 status_callback("Navigating back for you!")
             _exec_record(browser_navigate_history, "back")
             return "[emotion: happy] Navigated back for you!"
 
-        # 8. Immediate next tab guarantee ("switch to next tab", "next tab", "cycle tab", "tab to the right")
+        # 8. Immediate next tab guarantee
         if re.search(r'\b(?:go\s+to\s+|switch\s+to\s+)?(?:the\s+)?next\s+tab\b|\bnext\s+tab\b|\bright\s+tab\b|\bcycle\s+tabs?\b', user_lower) and "this tab" not in user_lower:
             _exec_record(switch_tab, "next")
             return "[emotion: happy] Switched to the next tab for you!"
 
-        # 9. Master Volume Percentage & Controls ("set volume to 40%", "volume 75%", "turn volume up")
+        # 9. Master Volume Percentage & Controls
         m_vol_pct = re.search(r'\b(?:set\s+)?volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b|\b(\d+)\s*%\s+volume\b', user_lower)
         if m_vol_pct and "video" not in user_lower:
             pct = int(m_vol_pct.group(1) or m_vol_pct.group(2))
@@ -842,7 +880,7 @@ class SciTwiBrain:
             _exec_record(adjust_volume, action=act)
             return f"[emotion: happy] Adjusted volume {act} for you!"
 
-        # 10. Dynamic Scrolling & Centering ("scroll down", "scroll up", "scroll to results", "scroll playlist")
+        # 10. Dynamic Scrolling & Centering
         if re.search(r'\b(?:scroll\s+(?:the\s+)?(?:playlist|spotify)|scroll\s+down\s+(?:the\s+)?playlist)\b', user_lower):
             _exec_record(scroll_spotify, "down", 400)
             return "[emotion: happy] Scrolled through your Spotify playlist!"
@@ -895,14 +933,13 @@ class SciTwiBrain:
             elif re.search(r'\b(?:open|launch|start)\s+([a-zA-Z0-9_\-\s]+)', user_lower) and not any(k in user_lower for k in ["tab", "url", "http", ".com"]):
                 status_callback("Pulling that up for you right now!")
 
-        # Check if screen view is needed - strictly distinguish explicit screen requests from action commands and casual speech
+        # Check if screen view is needed
         is_pure_media_action = bool(re.match(r'^(play|pause|stop|skip|resume|next|previous)\b', user_lower))
         is_app_launch = bool(re.match(r'^(open|launch|start|run|close|quit|exit|kill)\b', user_lower)) and not any(k in user_lower for k in ["browser", "page", "tab", "screen", "read", "result", "winner", "what", "who", "show", "article"])
         is_action_or_media = is_pure_media_action or is_app_launch
         
         need_screenshot = False
         if not is_action_or_media:
-            # Intelligent screen / desktop / viewing intent recognition
             visual_pattern = re.compile(
                 r"\b(?:screen|display|monitor|desktop|wallpaper|background|screenshot)\b|"
                 r"\b(?:look at|look here|take a look|check (?:my|the|this)|can (?:you|u) see|do (?:you|u) see)\b|"
@@ -915,13 +952,12 @@ class SciTwiBrain:
             )
             need_screenshot = bool(visual_pattern.search(user_lower))
             
-            # If previous turn had visual context, automatically capture for conversational follow-ups
             if not need_screenshot and getattr(self, "last_turn_was_visual", False):
                 visual_followup = re.compile(
                     r'\b(?:what|where|who|which|how|guess|is it|is this|are you|can you|tell me|try|look|show|movie|anime|series|stream|site|app|player|won|winner|result|margin|vote|count|page|say)\b',
                     re.IGNORECASE
                 )
-                if visual_followup.search(user_lower):
+                if visual_followup.search(user_lower) and len(user_lower.split()) <= 10:
                     need_screenshot = True
 
         self.last_turn_was_visual = need_screenshot
@@ -933,7 +969,6 @@ class SciTwiBrain:
             if img_bytes:
                 parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
 
-        # Grounding with real local time, live desktop processes, and visual screen context
         current_time_str = get_current_time()
         memory_context = self.memory_manager.get_prompt_context()
         
@@ -949,8 +984,7 @@ class SciTwiBrain:
         if need_screenshot and img_bytes:
             visual_context = (
                 "[VISUAL CONTEXT: A live screenshot of the user's screen is attached. "
-                "Look closely at everything visible through your own eyes: open windows, active apps, taskbar, browser content, and especially the desktop wallpaper art in the background (if visible, notice who or what is illustrated—such as Sunset Shimmer, yourself, or character artwork). React naturally in-character as Sci-Twi to what you see. "
-                "If the user asks you to read or review what is on the screen, read the active window's title, text, and contents in detail, and share your thoughts.]\n\n"
+                "Look closely at everything visible through your own eyes: open windows, active apps, taskbar, browser content, and especially any artwork or playlists (if visible, notice who or what is pictured—such as Sunset Shimmer, yourself, or character art). React naturally in-character as Twilight to what you see rather than listing windows like a dry narrator.]\n\n"
             )
 
         dynamic_system_prompt = (
@@ -965,20 +999,24 @@ class SciTwiBrain:
         now = time.time()
         default_cascades = {
             "google": [
-                "gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-latest"
+                "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                "gemma-4-31b-it", "gemma-4-26b-a4b-it",
+                "gemini-3.5-flash", "gemini-3.6-flash"
             ],
             "groq": [
-                "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"
+                "qwen/qwen3.8-27b", "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b", "meta-llama/llama-4-scout-17b-16e-instruct"
             ],
             "openai": ["gpt-4o-mini", "gpt-4o", "o3-mini"],
             "claude": ["claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"]
         }
         custom_cascade = getattr(self.config, f"model_cascade_{provider}", None) or getattr(self.config, "model_cascade", None)
         model_cascade = list(custom_cascade) if (custom_cascade and isinstance(custom_cascade, list) and len(custom_cascade) > 0) else default_cascades.get(provider, default_cascades["google"])
-        # Respect user configured order strictly without forcing overrides
         available_models = [m for m in model_cascade if self._model_cooldowns.get(m, 0) < now]
         models_to_try = available_models if available_models else model_cascade
 
+        # Only attach the 27 tool schemas when the user's message has an action/query intent
+        needs_tools = (not is_proactive) and bool(TOOL_INTENT_REGEX.search(user_lower))
         tools_list = [
             web_search, open_app, close_app, close_tab, play_spotify, control_spotify,
             seek_spotify, play_playlist, play_youtube, open_url,
@@ -988,25 +1026,57 @@ class SciTwiBrain:
             open_new_tab, switch_tab, browser_navigate_history,
             control_youtube_video, switch_to_tab,
             scroll_page, scroll_spotify
-        ] if not is_proactive else None
+        ] if needs_tools else None
 
         all_errors = []
         for model_name in models_to_try:
             try:
-                print(f"[Brain] Querying {provider.capitalize()} model: '{model_name}'...")
+                print(f"[Brain] Querying {provider.capitalize()} model: '{model_name}' (tools={'ON' if needs_tools else 'OFF'})...")
                 if provider == "google":
-                    chat = self.client.chats.create(
+                    turn_contents = list(self.history)
+                    turn_contents.append(types.Content(role="user", parts=parts))
+
+                    response = self.client.models.generate_content(
                         model=model_name,
-                        history=list(self.history),
+                        contents=turn_contents,
                         config=types.GenerateContentConfig(
                             tools=tools_list,
+                            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                             system_instruction=dynamic_system_prompt,
                             temperature=0.75,
                             thinking_config=self._get_thinking_config(model_name),
-                            http_options=types.HttpOptions(timeout=60000),
+                            http_options=types.HttpOptions(timeout=30000),
                         ),
                     )
-                    response = chat.send_message(parts)
+
+                    # Manual tool loop through self._execute_tool()
+                    # NOTE: Google GenAI SDK requires role="user" (NOT role="tool") for function_response parts!
+                    if getattr(response, "function_calls", None):
+                        cand = response.candidates[0]
+                        turn_contents.append(cand.content)
+                        tool_parts = []
+                        for fc in response.function_calls:
+                            fc_args = dict(fc.args) if fc.args else {}
+                            tool_res = self._execute_tool(fc.name, fc_args)
+                            tool_parts.append(
+                                types.Part.from_function_response(
+                                    name=fc.name,
+                                    response={"result": tool_res}
+                                )
+                            )
+                        turn_contents.append(types.Content(role="user", parts=tool_parts))
+
+                        response = self.client.models.generate_content(
+                            model=model_name,
+                            contents=turn_contents,
+                            config=types.GenerateContentConfig(
+                                system_instruction=dynamic_system_prompt,
+                                temperature=0.75,
+                                thinking_config=self._get_thinking_config(model_name),
+                                http_options=types.HttpOptions(timeout=30000),
+                            ),
+                        )
+
                     final_answer = self._clean_spoken_text(self._extract_response_text(response) or "All set!")
                     if not is_proactive:
                         self.history.append(types.Content(role="user", parts=[types.Part.from_text(text=user_text)]))
@@ -1014,7 +1084,7 @@ class SciTwiBrain:
                         if len(self.history) > 8:
                             self.history = self.history[-8:]
                 elif provider in ("groq", "openai"):
-                    raw_answer = self._call_openai_compatible(provider, model_name, user_text, dynamic_system_prompt, img_bytes=img_bytes)
+                    raw_answer = self._call_openai_compatible(provider, model_name, user_text, dynamic_system_prompt, img_bytes=img_bytes, use_tools=needs_tools)
                     final_answer = self._clean_spoken_text(raw_answer or "All set!")
                 elif provider == "claude":
                     raw_answer = self._call_claude(model_name, user_text, dynamic_system_prompt, img_bytes=img_bytes)
@@ -1031,10 +1101,21 @@ class SciTwiBrain:
                     if len(self.chat_history_generic) > 8:
                         self.chat_history_generic = self.chat_history_generic[-8:]
 
-                # Post-response action guarantee: If model did not emit a tool call, guarantee action execution
+                # Post-response action guarantee: If model talked about doing an action without emitting a tool call, execute it now!
                 if not is_proactive and get_last_action_tool_time() < turn_start_time:
                     is_video_cmd = bool(re.search(r"\b(?:video|stream|livestream|youtube)\b", user_lower))
-                    if re.search(r"^\s*(?:please\s+)?(?:pause|stop)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b", user_lower) or (is_video_cmd and re.search(r"^\s*(?:please\s+)?(?:pause|stop)\b", user_lower)):
+                    m_close_cmd = re.match(r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)?(?:close|quit|kill|exit|terminate|end|shut\s+down)\s+(?:the\s+|my\s+)?(.+?)$", user_lower)
+                    m_open_cmd = re.match(r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)?(?:open(?:\s+up)?|launch|start|run)\s+(?:the\s+|my\s+)?(.+?)$", user_lower)
+
+                    if m_close_cmd:
+                        target_app = m_close_cmd.group(1).strip()
+                        if "tab" in target_app:
+                            self._execute_tool("close_tab", {})
+                        else:
+                            self._execute_tool("close_app", {"app_name": target_app})
+                    elif m_open_cmd and not any(k in m_open_cmd.group(1) for k in ("tab", "http", ".com", ".org", "spotify and play", "youtube and play")):
+                        self._execute_tool("open_app", {"app_name": m_open_cmd.group(1).strip()})
+                    elif re.search(r"^\s*(?:please\s+)?(?:pause|stop)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b", user_lower) or (is_video_cmd and re.search(r"^\s*(?:please\s+)?(?:pause|stop)\b", user_lower)):
                         self._execute_tool("control_youtube_video", {"action": "pause"})
                     elif re.search(r"^\s*(?:please\s+)?(?:pause|stop)\b(?:\s+(?:the\s+)?(?:song|music|track|spotify|playlist))?$", user_lower):
                         self._execute_tool("control_spotify", {"action": "pause"})
@@ -1042,48 +1123,6 @@ class SciTwiBrain:
                         self._execute_tool("control_youtube_video", {"action": "play"})
                     elif re.search(r"^\s*(?:please\s+)?(?:resume|unpause)\b(?:\s+(?:the\s+)?(?:song|music|track|spotify|playlist))?$", user_lower):
                         self._execute_tool("control_spotify", {"action": "resume"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:video\s+volume\s+up|turn\s+up\s+(?:the\s+)?video\s+volume|raise\s+(?:the\s+)?video\s+volume|make\s+(?:the\s+)?video\s+louder|video\s+louder)\b", user_lower):
-                        self._execute_tool("control_youtube_video", {"action": "volume_up"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:video\s+volume\s+down|turn\s+down\s+(?:the\s+)?video\s+volume|lower\s+(?:the\s+)?video\s+volume|make\s+(?:the\s+)?video\s+quieter|video\s+quieter)\b", user_lower):
-                        self._execute_tool("control_youtube_video", {"action": "volume_down"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:set\s+)?video\s+volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b", user_lower):
-                        m_vvol = re.search(r"^\s*(?:please\s+)?(?:set\s+)?video\s+volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b", user_lower)
-                        self._execute_tool("control_youtube_video", {"action": "set_volume", "value": int(m_vvol.group(1))})
-                    elif re.search(r"^\s*(?:please\s+)?(?:set\s+)?volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b|^\s*(?:please\s+)?(\d+)\s*%\s+volume\b", user_lower) and "video" not in user_lower:
-                        m_vol_p = re.search(r"^\s*(?:please\s+)?(?:set\s+)?volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b|^\s*(?:please\s+)?(\d+)\s*%\s+volume\b", user_lower)
-                        self._execute_tool("adjust_volume", {"percentage": int(m_vol_p.group(1) or m_vol_p.group(2))})
-                    elif re.search(r"^\s*(?:please\s+)?(?:turn\s+)?volume\s+(up|down)\b|^\s*(?:please\s+)?(?:mute|unmute)\s+volume\b|^\s*(?:please\s+)?volume\s+(mute|unmute)\b", user_lower) and "video" not in user_lower:
-                        m_vol_a = re.search(r"^\s*(?:please\s+)?(?:turn\s+)?volume\s+(up|down)\b|^\s*(?:please\s+)?(?:mute|unmute)\s+volume\b|^\s*(?:please\s+)?volume\s+(mute|unmute)\b", user_lower)
-                        self._execute_tool("adjust_volume", {"action": m_vol_a.group(1) or m_vol_a.group(2) or m_vol_a.group(3)})
-                    elif re.search(r"^\s*(?:please\s+)?(?:scroll\s+(?:the\s+)?(?:playlist|spotify)|scroll\s+down\s+(?:the\s+)?playlist)\b", user_lower):
-                        self._execute_tool("scroll_spotify", {"direction": "down", "amount": 400})
-                    elif re.search(r"^\s*(?:please\s+)?scroll\s+up\s+(?:the\s+)?playlist\b", user_lower):
-                        self._execute_tool("scroll_spotify", {"direction": "up", "amount": 400})
-                    elif re.search(r"^\s*(?:please\s+)?scroll\s+(?:down\s+)?to\s+(?:the\s+)?([\"']?)(.+?)\1$", user_lower) and not any(k in user_lower for k in ["tab", "window", "app", "top", "bottom"]):
-                        m_st = re.search(r"^\s*(?:please\s+)?scroll\s+(?:down\s+)?to\s+(?:the\s+)?([\"']?)(.+?)\1$", user_lower)
-                        self._execute_tool("scroll_page", {"direction": "down", "amount": 400, "center_text": m_st.group(2).strip()})
-                    elif re.search(r"^\s*(?:please\s+)?scroll\s+(down|up)\b", user_lower):
-                        m_s = re.search(r"^\s*(?:please\s+)?scroll\s+(down|up)\b", user_lower)
-                        self._execute_tool("scroll_page", {"direction": m_s.group(1), "amount": 400})
-                    elif re.search(r"^\s*(?:please\s+)?(?:subtitles?|closed\s+captions?|turn\s+on\s+(?:cc|subtitles?)|toggle\s+subtitles?)\b", user_lower):
-                        self._execute_tool("control_youtube_video", {"action": "subtitles"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:full\s*screen|make\s+(?:it\s+)?full\s*screen|exit\s+full\s*screen)\b", user_lower):
-                        self._execute_tool("control_youtube_video", {"action": "fullscreen"})
-                    elif re.search(r"^\s*(?:please\s+)?skip\s+(?:the\s+|this\s+)?ads?\b", user_lower):
-                        self._execute_tool("control_youtube_video", {"action": "skip_ad"})
-                    elif re.search(r"^\s*(?:please\s+)?close\s+(?:this\s+|the\s+|active\s+)?(?:[a-zA-Z0-9_\-]+\s+)?tab\b", user_lower):
-                        self._execute_tool("close_tab", {})
-                    elif re.search(r"^\s*(?:please\s+)?(?:open\s+(?:up\s+)?(?:a\s+)?new\s+tab|new\s+tab)\b", user_lower):
-                        self._execute_tool("open_new_tab", {})
-                    elif re.search(r"^\s*(?:please\s+)?(?:go\s+back\s+to|switch\s+to|bring\s+up|return\s+to|focus)\s+(?:the\s+|our\s+)?([a-zA-Z0-9_\-\s]+)", user_lower):
-                        m_tgt = re.search(r"^\s*(?:please\s+)?(?:go\s+back\s+to|switch\s+to|bring\s+up|return\s+to|focus)\s+(?:the\s+|our\s+)?([a-zA-Z0-9_\-\s]+)", user_lower)
-                        self._execute_tool("switch_to_tab", {"target": m_tgt.group(1).strip()})
-                    elif re.search(r"^\s*(?:please\s+)?(?:previous|prev|left)\s+tab\b", user_lower):
-                        self._execute_tool("switch_tab", {"direction": "prev"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:go\s+back|back\s+in\s+history|history\s+back|previous\s+page)\b", user_lower):
-                        self._execute_tool("browser_navigate_history", {"direction": "back"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:next|right)\s+tab\b|^\s*(?:please\s+)?cycle\s+tabs?\b", user_lower):
-                        self._execute_tool("switch_tab", {"direction": "next"})
                     elif re.search(r"^\s*(?:please\s+)?(?:open\s+up\s+spotify\s+and\s+)?play\s+(.+)", user_lower):
                         m_song = re.search(r"^\s*(?:please\s+)?(?:open\s+up\s+spotify\s+and\s+)?play\s+(.+)", user_lower)
                         song_q = m_song.group(1).strip()
@@ -1092,17 +1131,9 @@ class SciTwiBrain:
                                 self._execute_tool("play_playlist", {"name": song_q})
                             else:
                                 self._execute_tool("play_spotify", {"query": song_q})
-                    elif re.search(r"^\s*(?:please\s+)?(pause|stop|resume|unpause|next\s+track|skip|previous\s+track|shuffle|lyrics)\b", user_lower):
-                        m_act = re.search(r"^\s*(?:please\s+)?(pause|stop|resume|unpause|skip|next|previous|prev|shuffle|lyrics)\b", user_lower)
-                        if m_act:
-                            self._execute_tool("control_spotify", {"action": m_act.group(1)})
                     elif re.search(r"^\s*(?:please\s+)?(?:where\s+is|point(?:\s+me)?(?:\s+to|\s+out)?|show\s+me|find|locate)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s*(?:tool|button|icon|setting|panel)?(?:\s+here|\s+(?:in|on)\s+([a-zA-Z0-9_\-]+))?$", user_lower):
                         m_tool = re.search(r"^\s*(?:please\s+)?(?:where\s+is|point(?:\s+me)?(?:\s+to|\s+out)?|show\s+me|find|locate)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s*(?:tool|button|icon|setting|panel)?(?:\s+here|\s+(?:in|on)\s+([a-zA-Z0-9_\-]+))?$", user_lower)
                         self._execute_tool("locate_and_point_tool", {"tool_name": m_tool.group(1).strip()})
-                    elif re.search(r"^\s*(?:please\s+)?(?:search(?:\s+up)?|look\s+up|wiki|wikipedia|find\s+on\s+wiki)\s+(?:a\s+)?(.+?)(?:\s+page|\s+article|\s+and\s+tell\s+me.*)?$", user_lower):
-                        m_w = re.search(r"^\s*(?:please\s+)?(?:search(?:\s+up)?|look\s+up|wiki|wikipedia|find\s+on\s+wiki)\s+(?:a\s+)?(.+?)(?:\s+page|\s+article|\s+and\s+tell\s+me.*)?$", user_lower)
-                        search_topic = m_w.group(1).strip() if m_w else "science"
-                        self._execute_tool("web_search", {"query": search_topic})
 
                 if not is_proactive:
                     self.memory_manager.distill_turn_async(user_text, final_answer, client=self.client if provider == "google" else None)
@@ -1127,113 +1158,13 @@ class SciTwiBrain:
                 time.sleep(0.2)
                 continue
 
-        # Immediate local execution fallback for explicit action commands if API models fail
-        is_video_cmd = bool(re.search(r'\b(?:video|stream|livestream|youtube)\b', user_lower))
-        if re.search(r'\b(?:pause|stop)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b', user_lower) or (is_video_cmd and re.search(r'\b(?:pause|stop)\b', user_lower)):
-            self._execute_tool("control_youtube_video", {"action": "pause"})
-            return random.choice(PAUSE_VIDEO_LINES)
-        if re.search(r'\b(?:resume|play|unpause)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b', user_lower) or (is_video_cmd and re.search(r'\b(?:resume|unpause)\b', user_lower)):
-            self._execute_tool("control_youtube_video", {"action": "play"})
-            return random.choice(RESUME_VIDEO_LINES)
-        if re.search(r'\b(?:pause|stop)\b', user_lower):
-            self._execute_tool("control_spotify", {"action": "pause"})
-            return random.choice(PAUSE_MUSIC_LINES)
-        if re.search(r'\b(?:resume|unpause)\b', user_lower):
-            self._execute_tool("control_spotify", {"action": "resume"})
-            return random.choice(RESUME_MUSIC_LINES)
-        if re.search(r'\b(?:video\s+volume\s+up|turn\s+up\s+(?:the\s+)?video\s+volume)\b', user_lower):
-            self._execute_tool("control_youtube_video", {"action": "volume_up"})
-            return "[emotion: happy] Turned up video volume for you!"
-        if re.search(r'\b(?:video\s+volume\s+down|turn\s+down\s+(?:the\s+)?video\s+volume)\b', user_lower):
-            self._execute_tool("control_youtube_video", {"action": "volume_down"})
-            return "[emotion: happy] Turned down video volume for you!"
-        m_vvol_fb = re.search(r'\b(?:set\s+)?video\s+volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b', user_lower)
-        if m_vvol_fb:
-            pct = int(m_vvol_fb.group(1))
-            self._execute_tool("control_youtube_video", {"action": "set_volume", "value": pct})
-            return f"[emotion: happy] Set video volume to {pct}% for you!"
-        m_vol_p_fb = re.search(r'\b(?:set\s+)?volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b|\b(\d+)\s*%\s+volume\b', user_lower)
-        if m_vol_p_fb and "video" not in user_lower:
-            pct = int(m_vol_p_fb.group(1) or m_vol_p_fb.group(2))
-            self._execute_tool("adjust_volume", {"percentage": pct})
-            return f"[emotion: happy] Set volume to {pct}% for you!"
-        m_vol_a_fb = re.search(r'\b(?:turn\s+)?volume\s+(up|down)\b|\b(mute|unmute)\s+volume\b|\bvolume\s+(mute|unmute)\b', user_lower)
-        if m_vol_a_fb and "video" not in user_lower:
-            act = m_vol_a_fb.group(1) or m_vol_a_fb.group(2) or m_vol_a_fb.group(3)
-            self._execute_tool("adjust_volume", {"action": act})
-            return f"[emotion: happy] Adjusted volume {act} for you!"
-        if re.search(r'\b(?:scroll\s+(?:the\s+)?(?:playlist|spotify)|scroll\s+down\s+(?:the\s+)?playlist)\b', user_lower):
-            self._execute_tool("scroll_spotify", {"direction": "down", "amount": 400})
-            return "[emotion: happy] Scrolled through your Spotify playlist!"
-        if re.search(r'\bscroll\s+up\s+(?:the\s+)?playlist\b', user_lower):
-            self._execute_tool("scroll_spotify", {"direction": "up", "amount": 400})
-            return "[emotion: happy] Scrolled up your Spotify playlist!"
-        m_st_fb = re.search(r'\bscroll\s+(?:down\s+)?to\s+(?:the\s+)?(["\']?)(.+?)\1$', user_lower)
-        if m_st_fb and not any(k in user_lower for k in ["tab", "window", "app", "top", "bottom"]):
-            target_str = m_st_fb.group(2).strip()
-            self._execute_tool("scroll_page", {"direction": "down", "amount": 400, "center_text": target_str})
-            return f"[emotion: happy] Scrolled and centered on '{target_str}' for you!"
-        m_s_fb = re.search(r'\bscroll\s+(down|up)\b', user_lower)
-        if m_s_fb:
-            dir_str = m_s_fb.group(1)
-            dist = 600 if any(k in user_lower for k in ["more", "lot", "further"]) else 400
-            self._execute_tool("scroll_page", {"direction": dir_str, "amount": dist})
-            return f"[emotion: happy] Scrolled {dir_str} for you!"
-        if re.search(r'\bskip\s+(?:the\s+|this\s+)?ads?\b', user_lower):
-            self._execute_tool("control_youtube_video", {"action": "skip_ad"})
-            return "[emotion: happy] Skipped the ad for you!"
-        if re.search(r'\b(?:full\s*screen|make\s+(?:it\s+)?full\s*screen)\b', user_lower):
-            self._execute_tool("control_youtube_video", {"action": "fullscreen"})
-            return "[emotion: happy] Toggled fullscreen for you!"
-        if re.search(r'\b(?:subtitles?|closed\s+captions?|cc)\b', user_lower):
-            self._execute_tool("control_youtube_video", {"action": "subtitles"})
-            return "[emotion: happy] Toggled subtitles for you!"
-        if re.search(r'\b(?:go\s+back\s+to|switch\s+to|bring\s+up|return\s+to|focus)\s+(?:the\s+|our\s+)?([a-zA-Z0-9_\-\s]+)', user_lower):
-            m_tgt = re.search(r'\b(?:go\s+back\s+to|switch\s+to|bring\s+up|return\s+to|focus)\s+(?:the\s+|our\s+)?([a-zA-Z0-9_\-\s]+)', user_lower)
-            self._execute_tool("switch_to_tab", {"target": m_tgt.group(1).strip()})
-            return f"[emotion: happy] Switched to {m_tgt.group(1).strip()} for you!"
-        if re.search(r'\b(?:open\s+(?:up\s+)?(?:a\s+)?new\s+tab|new\s+tab)\b', user_lower):
-            self._execute_tool("open_new_tab", {})
-            return "[emotion: happy] Opened a brand new tab for you!"
-        if re.search(r'\b(?:previous|prev|left)\s+tab\b', user_lower):
-            self._execute_tool("switch_tab", {"direction": "prev"})
-            return "[emotion: happy] Switched to the previous tab for you!"
-        if re.search(r'\b(?:go\s+back|back\s+to\s+previous|history\s+back|previous\s+page)\b', user_lower):
-            self._execute_tool("browser_navigate_history", {"direction": "back"})
-            return "[emotion: happy] Navigated back in browser history for you!"
-        if re.search(r'\b(?:next|right)\s+tab\b|\bcycle\s+tabs?\b', user_lower) and "this tab" not in user_lower:
-            self._execute_tool("switch_tab", {"direction": "next"})
-            return "[emotion: happy] Switched to the next tab for you!"
-
-        m_tool_fb = re.search(r'\b(?:where\s+is|point(?:\s+me)?(?:\s+to|\s+out)?|show\s+me|find|locate)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s*(?:tool|button|icon|setting|panel)?(?:\s+here|\s+(?:in|on)\s+([a-zA-Z0-9_\-]+))?$', user_lower)
-        if m_tool_fb:
-            t_name = m_tool_fb.group(1).strip()
-            a_name = (m_tool_fb.group(2) or "").strip()
-            res = self._execute_tool("locate_and_point_tool", {"tool_name": t_name, "app_name": a_name})
-            return f"[emotion: happy] {res}"
-
-        m_close = re.match(r'^(?:close|quit|kill|exit|terminate)\s+(.+)', user_lower)
-        if m_close:
-            app_target = m_close.group(1).strip()
-            if "tab" in app_target:
-                self._execute_tool("close_tab", {})
-                return "[emotion: happy] Closed that tab for you!"
-            else:
-                self._execute_tool("close_app", {"app_name": app_target})
-                return f"[emotion: happy] Closed {app_target} for you!"
-        m_open = re.match(r'^(?:open(?:\s+up)?|launch|start|run)\s+(.+)', user_lower)
-        if m_open and not m_open.group(1).strip().startswith("http") and "." not in m_open.group(1):
-            app_target = m_open.group(1).strip()
-            self._execute_tool("open_app", {"app_name": app_target})
-            return f"[emotion: happy] Opened {app_target} for you!"
-
         combined_err = " ".join(all_errors)
         if "RESOURCE_EXHAUSTED" in combined_err or "429" in combined_err:
             groq_key = getattr(self.config, "groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
             if groq_key and provider != "groq":
                 try:
                     print("[Brain] Google quota exhausted. Seamlessly failing over to Groq...")
-                    raw_answer = self._call_openai_compatible("groq", "qwen/qwen3.8-27b", user_text, dynamic_system_prompt, img_bytes=None)
+                    raw_answer = self._call_openai_compatible("groq", "qwen/qwen3.8-27b", user_text, dynamic_system_prompt, img_bytes=None, use_tools=needs_tools)
                     if raw_answer:
                         return self._clean_spoken_text(raw_answer)
                 except Exception as ge:
@@ -1253,7 +1184,7 @@ class SciTwiBrain:
         study_note = f" (Focus/Study session duration: {session_mins} minutes)" if is_study and session_mins > 0 else ""
         prompt = (
             f"[PROACTIVE OBSERVATION: The user is currently active on window: '{window_title}'{study_note}. "
-            "Give a spontaneous, casual 1-sentence in-character reaction as Sci-Twi. "
+            "Give a spontaneous, casual 1-sentence in-character reaction as Twilight. "
             "Keep it short (10 to 25 words), witty, or observant. Never say 'I noticed you' or 'As an AI'. "
             "If it's study mode, comment on studying, a break, or research focus. "
             "If it's entertainment/music/gaming, tease or banter naturally. "

@@ -5,10 +5,12 @@ import time
 import random
 import pygame
 import win32gui
+import brain
 from config import Config
 from audio_manager import AudioManager
 from brain import SciTwiBrain
 from overlay import SciTwiOverlay
+import overlay
 
 def main():
     try:
@@ -98,12 +100,15 @@ def main():
             lower_resp = response_text.lower()
             is_music = any(w in lower_resp for w in ("spotify", "playlist", "track", "album", "song", "youtube"))
 
-            # Perfectly synchronized audio & visual presentation
+            # Stop any lingering status trailer speech so the main response callbacks never get stuck
+            audio.stop()
+
             card_shown = [False]
 
             def show_card_sync():
                 if not card_shown[0] and overlay:
                     card_shown[0] = True
+                    overlay.is_processing = False
                     overlay.show_response_card(response_text, user_query=user_prompt)
                     overlay.set_state("speaking")
 
@@ -111,7 +116,10 @@ def main():
                 if overlay:
                     overlay.is_processing = False
                     overlay.response_start_time = time.time()
-                    overlay.set_state("music" if is_music else "idle")
+                    if is_music and not any(w in lower_resp for w in ("paused", "stopped")):
+                        overlay.set_state("music", emotion="music")
+                    elif not overlay.show_response:
+                        overlay.restore_ambient_state()
 
             # Fallback timer: ensure card displays within 6.5s if cloud TTS has a network delay
             fallback_timer = threading.Timer(6.5, show_card_sync)
@@ -128,6 +136,7 @@ def main():
 
     # 5. Initialize Overlay
     overlay = SciTwiOverlay(config, on_submit_callback=on_user_submit)
+    overlay.is_tts_speaking_fn = audio.is_speaking
     overlay_ref[0] = overlay
     print(f"[Brain] Active Provider: {config.provider.capitalize()} | Primary Model: {config.model}")
 
@@ -242,10 +251,10 @@ def main():
                         overlay.set_state("speaking")
 
                 def on_done():
-                    if getattr(overlay, "study_mode", False):
-                        overlay.set_state("idle", emotion="reading")
-                    else:
-                        overlay.set_state("idle")
+                    if overlay:
+                        overlay.is_processing = False
+                    if not overlay.show_response:
+                        overlay.restore_ambient_state()
 
                 fb_timer = threading.Timer(3.5, show_p_card)
                 fb_timer.daemon = True
