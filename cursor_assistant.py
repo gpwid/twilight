@@ -1,3 +1,76 @@
+def get_spotify_element_coords(spotify_hwnd):
+    """Accurately compute modern Spotify UI coordinates for search bar and dynamically detect green play button."""
+    attach_desktop()
+    if not win32gui:
+        return (960, 35), (157, 445)
+    r = win32gui.GetWindowRect(spotify_hwnd)
+    w = r[2] - r[0]
+    h = r[3] - r[1]
+
+    # Search bar input: In modern Spotify, the Home icon and Search capsule sit together in the top bar.
+    # The search capsule center sits around horizontal middle of the window.
+    search_x = r[0] + (w // 2 if w >= 900 else int(w * 0.45))
+    search_y = r[1] + 42
+
+    # Big circular green play button: Try fast visual detection first (<25ms)
+    play_x = None
+    play_y = None
+    try:
+        from PIL import ImageGrab
+        top = max(0, r[1] + 60)
+        bottom = min(win32api.GetSystemMetrics(1), r[1] + int(h * 0.85))
+        left = max(0, r[0])
+        right = min(win32api.GetSystemMetrics(0), r[0] + min(w, 800))
+        im = ImageGrab.grab(bbox=(left, top, right, bottom))
+        green_pts = []
+        for py in range(0, im.size[1], 2):
+            for px in range(0, im.size[0], 2):
+                pr, pg, pb = im.getpixel((px, py))[:3]
+                if pg > 150 and pr < 80 and pb < 120 and pg > pr * 2.0:
+                    green_pts.append((px, py))
+        
+        if len(green_pts) >= 40:
+            from collections import defaultdict
+            grid = defaultdict(list)
+            for gx, gy in green_pts:
+                grid[(gx // 20, gy // 20)].append((gx, gy))
+            clusters = []
+            visited = set()
+            for c in grid:
+                if c in visited: continue
+                grp = []
+                q = [c]
+                visited.add(c)
+                while q:
+                    curr = q.pop()
+                    grp.extend(grid[curr])
+                    for dx in [-1, 0, 1]:
+                        for dy in [-1, 0, 1]:
+                            nc = (curr[0] + dx, curr[1] + dy)
+                            if nc in grid and nc not in visited:
+                                visited.add(nc)
+                                q.append(nc)
+                if len(grp) >= 30:
+                    xs = [p[0] for p in grp]
+                    ys = [p[1] for p in grp]
+                    bw = max(xs) - min(xs)
+                    bh = max(ys) - min(ys)
+                    if 35 <= bw <= 90 and 35 <= bh <= 90:
+                        clusters.append((len(grp), left + (min(xs) + max(xs)) // 2, top + (min(ys) + max(ys)) // 2))
+            if clusters:
+                clusters.sort(key=lambda x: -x[0])
+                play_x = clusters[0][1]
+                play_y = clusters[0][2]
+    except Exception as e:
+        print(f"[Cursor] Dynamic Spotify play button detect note: {e}")
+
+    if play_x is None:
+        # Fallback to verified layout offset (main page header play button below artist/playlist banner)
+        play_x = r[0] + max(120, min(180, int(w * 0.10)))
+        play_y = r[1] + min(520, max(420, int(h * 0.44)))
+
+    return (search_x, search_y), (play_x, play_y)
+
 import os
 import sys
 import time
@@ -210,6 +283,51 @@ def get_spotify_window():
 
     return chosen_hwnd
 
+
+def ensure_spotify_window_ready(timeout: float = 7.0) -> int | None:
+    """Ensure Spotify is running, fully rendered (not a black cold-start window), and ready for input."""
+    attach_desktop()
+    if not win32gui:
+        return None
+    cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+    spotify_hwnd = get_spotify_window()
+    if not spotify_hwnd:
+        try:
+            os.startfile("spotify:")
+        except Exception:
+            pass
+        start = time.time()
+        while time.time() - start < timeout:
+            time.sleep(0.3)
+            sp = get_spotify_window()
+            if sp:
+                spotify_hwnd = sp
+                break
+
+    if not spotify_hwnd:
+        return None
+
+    # Wait until Spotify UI has finished cold-starting and is no longer a black/blank window
+    start_ready = time.time()
+    while time.time() - start_ready < timeout:
+        # Check CLI status if available
+        if os.path.exists(cli):
+            try:
+                import subprocess
+                res = subprocess.run([cli, "status"], capture_output=True, timeout=1.2)
+                if res.returncode == 0:
+                    break
+            except Exception:
+                pass
+        # Check visual rendering
+        if wait_for_spotify_ui_ready(spotify_hwnd, timeout=0.8):
+            break
+        time.sleep(0.25)
+
+    force_foreground_window(spotify_hwnd)
+    time.sleep(0.2)
+    return spotify_hwnd
+
 def wait_for_spotify_ui_ready(hwnd, timeout: float = 3.5) -> bool:
     """Wait until Spotify window is rendered and not blank/black from cold start."""
     from PIL import ImageGrab, ImageStat
@@ -233,15 +351,45 @@ def wait_for_spotify_ui_ready(hwnd, timeout: float = 3.5) -> bool:
         time.sleep(0.25)
     return False
 
+
+def find_user_playlist(playlist_name: str) -> tuple[str | None, str | None]:
+    """Search user's saved Spotify library playlists for an exact or substring match."""
+    cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+    if not os.path.exists(cli) or not playlist_name:
+        return None, None
+    clean = re.sub(r'^(?:my|the)\s+', '', playlist_name.strip(), flags=re.IGNORECASE).strip()
+    clean_lower = clean.lower()
+    clean_no_pl = re.sub(r'\s+playlists?$', '', clean_lower).strip()
+
+    try:
+        import subprocess
+        import json
+        res = subprocess.run([cli, "library", "list", "--type", "playlist", "--format", "json", "--limit", "100"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5)
+        if res.returncode == 0 and res.stdout.strip():
+            data = json.loads(res.stdout)
+            items = data.get("items", [])
+            for p in items:
+                pname = (p.get("name") or "").strip().lower()
+                if pname and (pname == clean_lower or pname == clean_no_pl):
+                    return p.get("uri"), p.get("name")
+            for p in items:
+                pname = (p.get("name") or "").strip().lower()
+                if pname and (clean_no_pl in pname or clean_lower in pname or pname in clean_lower):
+                    return p.get("uri"), p.get("name")
+    except Exception as e:
+        print(f"[Cursor] find_user_playlist note: {e}")
+    return None, None
+
 def get_browser_window():
-    """Locate an active visible browser window (Chrome, Edge, Brave, Firefox)."""
+    """Locate an active, visible browser window (Chrome, Edge, Brave, Firefox), un-minimizing if needed."""
     attach_desktop()
     if not win32gui:
         return None
-    browser_hwnd = None
+    best_hwnd = None
+    minimized_hwnd = None
     candidates = ["chrome", "msedge", "brave", "firefox"]
     def cb(h, _):
-        nonlocal browser_hwnd
+        nonlocal best_hwnd, minimized_hwnd
         try:
             t = (win32gui.GetWindowText(h) or "").strip().lower()
             pname = ""
@@ -252,9 +400,18 @@ def get_browser_window():
                 except Exception:
                     pass
             if any(b in t or b in pname for b in candidates):
-                if not any(k in t for k in ["default ime", "msctfime", "ciceroui"]):
-                    browser_hwnd = h
-                    return False
+                if any(k in t for k in ["default ime", "msctfime", "ciceroui"]):
+                    return True
+                if win32gui.IsWindowVisible(h):
+                    r = win32gui.GetWindowRect(h)
+                    w = r[2] - r[0]
+                    h_dim = r[3] - r[1]
+                    is_min = win32gui.IsIconic(h) or r[0] <= -10000
+                    if not is_min and w >= 300 and h_dim >= 200:
+                        best_hwnd = h
+                        return False
+                    elif is_min and not minimized_hwnd:
+                        minimized_hwnd = h
         except Exception:
             pass
         return True
@@ -263,7 +420,17 @@ def get_browser_window():
         win32gui.EnumWindows(cb, None)
     except Exception:
         pass
-    return browser_hwnd
+    chosen = best_hwnd or minimized_hwnd
+    if chosen and (win32gui.IsIconic(chosen) or win32gui.GetWindowRect(chosen)[0] <= -10000):
+        try:
+            win32gui.ShowWindow(chosen, win32con.SW_RESTORE)
+            for _ in range(12):
+                time.sleep(0.04)
+                if win32gui.GetWindowRect(chosen)[0] > -10000:
+                    break
+        except Exception:
+            pass
+    return chosen
 
 def type_text(text: str, delay: float = 0.055):
     """Type text characters via Windows keyboard events with lively one-by-one cadence."""
@@ -462,144 +629,127 @@ def find_spotify_green_play_button(spotify_hwnd):
         return None
 
 def play_spotify_playlist_with_cursor(playlist_name: str = ""):
-    """Smart visual automation for Spotify playlists: selects sidebar playlist or searches, then clicks the big green play button."""
+    """Smart visual & CLI automation for Spotify playlists: searches playlist, glides to play button, plays, and restores cursor."""
     attach_desktop()
     if not win32gui or not win32api:
         return False
-    spotify_hwnd = get_spotify_window()
-    if not spotify_hwnd:
-        os.system("start spotify:")
-        for _ in range(50):
-            time.sleep(0.2)
-            sp = get_spotify_window()
-            if sp:
-                spotify_hwnd = sp
-                break
-        time.sleep(1.5)
+    spotify_hwnd = ensure_spotify_window_ready(timeout=7.0)
     if not spotify_hwnd:
         return False
 
     try:
+        clean = (playlist_name or "").strip()
+        cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+        played = False
+
+        # 1. Match user's own library playlist FIRST (e.g. "radiohead playlist", "sciset", "writing playlist")
+        if os.path.exists(cli) and clean:
+            user_uri, user_name = find_user_playlist(clean)
+            if user_uri:
+                try:
+                    import subprocess
+                    subprocess.run([cli, "play", user_uri], capture_output=True, timeout=1.5)
+                    subprocess.run([cli, "navigate", user_uri], capture_output=True, timeout=1.5)
+                    played = True
+                    print(f"[Cursor] Matched user library playlist: '{user_name}' ({user_uri})")
+                except Exception as pe:
+                    print(f"[Cursor] User playlist play note: {pe}")
+
+        clean = re.sub(r'^(?:play|open|put on)\s+(?:up\s+)?(?:spotify\s+and\s+)?(?:some\s+)?', '', clean, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'^(?:my|the)\s+', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'\s+playlists?$', '', clean, flags=re.IGNORECASE).strip()
+
+        # Fallback to public playlist search if not in library
+        if not played and os.path.exists(cli) and clean:
+            try:
+                import subprocess
+                import json
+                res = subprocess.run([cli, "search", clean, "--type", "playlist", "--format", "json", "--limit", "3"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0)
+                if res.returncode == 0 and res.stdout and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    pls = data.get("playlists", [])
+                    if pls:
+                        pl_uri = pls[0].get("uri")
+                        if pl_uri:
+                            subprocess.run([cli, "play", pl_uri], capture_output=True, timeout=1.5)
+                            subprocess.run([cli, "navigate", pl_uri], capture_output=True, timeout=1.5)
+                            played = True
+            except Exception as pe:
+                print(f"[Cursor] spotify_cli playlist note: {pe}")
+
+        # 2. Visual cursor glide in Spotify UI
+        orig_cursor = win32api.GetCursorPos()
         force_foreground_window(spotify_hwnd)
-        wait_for_spotify_ui_ready(spotify_hwnd, timeout=4.0)
-        time.sleep(0.15)
+        time.sleep(0.12)
         r = win32gui.GetWindowRect(spotify_hwnd)
         w = r[2] - r[0]
         h = r[3] - r[1]
 
-        clean = (playlist_name or "").strip()
-        clean = re.sub(r'^(?:play|open|put on)\s+(?:up\s+)?(?:spotify\s+and\s+)?(?:some\s+)?', '', clean, flags=re.IGNORECASE).strip()
-        is_my_library = (not clean) or any(k in clean.lower() for k in ("one of my playlist", "my playlist", "one of my", "mine", "library", "saved playlist", "random"))
+        (search_x, search_y), (play_x, play_y) = get_spotify_element_coords(spotify_hwnd)
 
-        if is_my_library:
-            # 1. Click user's saved playlist on the left sidebar
-            pl_x = r[0] + 48
-            pl_y = r[1] + 240
-            glide_hardware_cursor(pl_x, pl_y, action="click", glide_time=0.35)
-            time.sleep(0.35)
-        else:
-            # 2. Check if already on the playlist page
-            t_win = (win32gui.GetWindowText(spotify_hwnd) or "").lower()
-            if clean.lower() in t_win:
-                pass
-            else:
-                # Glide to search bar and search playlist
-                sx = r[0] + int(w * 0.44)
-                sy = r[1] + 36
-                glide_hardware_cursor(sx, sy, action="click", glide_time=0.32)
-                time.sleep(0.04)
-                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-                win32api.keybd_event(ord('A'), 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(ord('A'), 0, win32con.KEYEVENTF_KEYUP, 0)
-                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-                time.sleep(0.03)
-                type_text(f"{clean} playlist")
-                time.sleep(0.04)
-                win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
-                time.sleep(0.40)
-                # Click the playlist result card
-                card_x = r[0] + int(w * 0.32)
-                card_y = r[1] + 280
-                glide_hardware_cursor(card_x, card_y, action="click", glide_time=0.32)
-                time.sleep(0.35)
+        if not played and clean:
+            # Glide to search bar and type
+            glide_hardware_cursor(search_x, search_y, action="click", glide_time=0.25)
+            time.sleep(0.04)
+            win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+            win32api.keybd_event(ord('K'), 0, 0, 0)
+            time.sleep(0.02)
+            win32api.keybd_event(ord('K'), 0, win32con.KEYEVENTF_KEYUP, 0)
+            win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+            time.sleep(0.04)
+            type_text(clean, delay=0.035)
+            time.sleep(0.04)
+            win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
+            time.sleep(0.02)
+            win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+            time.sleep(0.25)
+            # Re-detect play button after playlist loads
+            _, (play_x, play_y) = get_spotify_element_coords(spotify_hwnd)
 
-        # 3. Detect and click the big circular play button on the playlist header
-        green_btn = find_spotify_green_play_button(spotify_hwnd)
-        if green_btn:
-            gx, gy = green_btn
-            glide_hardware_cursor(gx, gy, action="click", glide_time=0.35)
-        else:
-            try:
-                from assistant_tools import ground_screen_element
-                px, py, _, _ = ground_screen_element("Spotify big circular play button on playlist header", "spotify")
-                if px is not None and py is not None:
-                    glide_hardware_cursor(px, py, action="click", glide_time=0.35)
-                else:
-                    fallback_gx = r[0] + 145
-                    fallback_gy = r[1] + 330
-                    glide_hardware_cursor(fallback_gx, fallback_gy, action="click", glide_time=0.35)
-            except Exception:
-                fallback_gx = r[0] + 145
-                fallback_gy = r[1] + 330
-                glide_hardware_cursor(fallback_gx, fallback_gy, action="click", glide_time=0.35)
-
+        # Glide Twilight's cursor to the big circular green play button on the page header
+        glide_hardware_cursor(play_x, play_y, action="click" if not played else "none", glide_time=0.25)
         time.sleep(0.05)
-        win32api.keybd_event(win32con.VK_SPACE, 0, 0, 0)
-        time.sleep(0.02)
-        win32api.keybd_event(win32con.VK_SPACE, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+        # Restore cursor cleanly
+        if orig_cursor:
+            win32api.SetCursorPos(orig_cursor)
         return True
     except Exception as e:
         print(f"[Cursor] play_spotify_playlist_with_cursor error: {e}")
         return False
 
+
 def search_and_play_spotify(query: str, search_x: int = None, search_y: int = None):
-    """Dynamic automation: activate Spotify, search query, scour tracks visually, and click play."""
+    """Full visual cursor automation for Spotify: glides cursor to search bar, types query, glides to top result, clicks play."""
     attach_desktop()
     if not win32gui or not win32api:
         return False
 
-    spotify_hwnd = get_spotify_window()
-    if not spotify_hwnd:
-        os.system("start spotify:")
-        for _ in range(50):
-            time.sleep(0.2)
-            sp = get_spotify_window()
-            if sp:
-                spotify_hwnd = sp
-                break
-        time.sleep(1.5)
+    clean_query = (query or "").strip()
+    clean_query = re.sub(r'^(?:play|open|put on)\s+(?:up\s+)?(?:spotify\s+and\s+)?(?:some\s+)?', '', clean_query, flags=re.IGNORECASE).strip()
+    clean_query = re.sub(r'^(?:any|some)\s+', '', clean_query, flags=re.IGNORECASE)
+    clean_query = re.sub(r'\s+songs?$', '', clean_query, flags=re.IGNORECASE).strip()
 
+    spotify_hwnd = ensure_spotify_window_ready(timeout=7.0)
     if not spotify_hwnd:
         return False
 
     try:
+        orig_cursor = win32api.GetCursorPos()
         force_foreground_window(spotify_hwnd)
-        wait_for_spotify_ui_ready(spotify_hwnd, timeout=4.0)
-        time.sleep(0.15)
+        time.sleep(0.12)
         r = win32gui.GetWindowRect(spotify_hwnd)
         w = r[2] - r[0]
         h = r[3] - r[1]
 
-        clean_query = (query or "").strip()
-        clean_query = re.sub(r'^(?:play|open|put on)\s+(?:up\s+)?(?:spotify\s+and\s+)?(?:some\s+)?', '', clean_query, flags=re.IGNORECASE).strip()
-        clean_query = re.sub(r'^(?:any|some)\s+', '', clean_query, flags=re.IGNORECASE)
-        clean_query = re.sub(r'\s+songs?$', '', clean_query, flags=re.IGNORECASE).strip()
+        # 1. Dynamically calculate exact modern Spotify search and play coordinates
+        (calc_sx, calc_sy), (calc_px, calc_py) = get_spotify_element_coords(spotify_hwnd)
+        sx = search_x if (search_x is not None) else calc_sx
+        sy = search_y if (search_y is not None) else calc_sy
+        glide_hardware_cursor(sx, sy, action="click", glide_time=0.26)
+        time.sleep(0.04)
 
-        is_my_library = (not clean_query) or any(k in clean_query.lower() for k in ("one of my playlist", "my playlist", "one of my", "mine", "library", "saved playlist"))
-        if is_my_library:
-            return play_spotify_playlist_with_cursor("")
-
-        # Navigate directly to search query in Spotify Desktop
-        import urllib.parse
-        os.system(f'start spotify:search:"{clean_query}"')
-        time.sleep(0.35)
-        force_foreground_window(spotify_hwnd)
-        time.sleep(0.08)
-
-        # Clear & type via Ctrl+K shortcut
+        # Clear existing text & focus search input via Ctrl+K
         win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
         win32api.keybd_event(ord('K'), 0, 0, 0)
         time.sleep(0.02)
@@ -607,185 +757,168 @@ def search_and_play_spotify(query: str, search_x: int = None, search_y: int = No
         win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
         time.sleep(0.04)
 
-        type_text(clean_query)
-        time.sleep(0.04)
-        win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-        time.sleep(0.02)
-        win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.35)
+        # 2. Type out the song query character-by-character on screen
+        if clean_query:
+            type_text(clean_query, delay=0.035)
+            time.sleep(0.04)
+            win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
+            time.sleep(0.02)
+            win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+            time.sleep(0.25)
+            # Re-detect play button after search results load
+            _, (calc_px, calc_py) = get_spotify_element_coords(spotify_hwnd)
 
-        # Hover over the Top Result card to reveal green play button
-        top_result_x = r[0] + int(w * 0.28)
-        top_result_y = r[1] + 240
-        glide_hardware_cursor(top_result_x, top_result_y, action="none", glide_time=0.22)
-        time.sleep(0.12)
+        # 3. Visually glide Twilight's cursor to the big green play button on the page
+        glide_hardware_cursor(calc_px, calc_py, action="click", glide_time=0.26)
+        time.sleep(0.08)
 
-        # Detect the revealed circular green play button on the Top Result card
-        green_btn = find_spotify_green_play_button(spotify_hwnd)
-        if green_btn:
-            glide_hardware_cursor(green_btn[0], green_btn[1], action="click", glide_time=0.25)
-        else:
-            first_song_x = r[0] + int(w * 0.60)
-            first_song_y = r[1] + 240
-            glide_hardware_cursor(first_song_x, first_song_y, action="double_click", glide_time=0.25)
-
-        # Background Spotify CLI sync if available
+        # Safety net: ensure playlist, artist catalog, or top hit track is playing accurately
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
         if os.path.exists(cli) and clean_query:
             try:
                 import subprocess
-                res = subprocess.run([cli, "search", clean_query, "--type", "track", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", timeout=1.8)
-                m = re.search(r'(spotify:track:[a-zA-Z0-9]+)', res.stdout)
-                if m:
-                    subprocess.run([cli, "play", m.group(1)], capture_output=True, text=True, encoding="utf-8", timeout=1.5)
-            except Exception:
-                pass
+                import json
+                import random
 
+                # 1. Check if user asked for a library playlist (e.g. "my radiohead playlist", "writing playlist")
+                user_uri, user_name = find_user_playlist(query)
+                if not user_uri:
+                    user_uri, user_name = find_user_playlist(clean_query)
+                if user_uri:
+                    subprocess.run([cli, "play", user_uri], capture_output=True, timeout=1.5)
+                    subprocess.run([cli, "navigate", user_uri], capture_output=True, timeout=1.5)
+                    print(f"[Cursor] Played user library playlist '{user_name}' ({user_uri})")
+                    return True
+
+                is_some_artist = bool(re.search(r'\b(?:some|any|random|shuffle)\b', query, re.IGNORECASE))
+                wants_alt = bool(re.search(r'\b(?:other|different|another|alternative|alternate|original|live|acoustic|remix|version)\b', query, re.IGNORECASE))
+
+                # 2. If user asked for "some [artist]" (e.g. "play some clairo"), pick a random top track from that artist
+                played_art = False
+                res_art = subprocess.run([cli, "search", clean_query, "--type", "artist", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.8)
+                if res_art.returncode == 0 and res_art.stdout.strip():
+                    try:
+                        art_data = json.loads(res_art.stdout)
+                        artists = art_data.get("artists", [])
+                        if artists and artists[0].get("name", "").lower() == clean_query.lower():
+                            if is_some_artist:
+                                # Fetch diverse artist tracks and pick randomly for genuine variety
+                                res_atracks = subprocess.run([cli, "search", f"artist:{clean_query}", "--type", "track", "--format", "json", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0)
+                                if res_atracks.returncode == 0 and res_atracks.stdout.strip():
+                                    at_data = json.loads(res_atracks.stdout)
+                                    a_tracks = at_data.get("tracks", [])
+                                    if a_tracks:
+                                        chosen = random.choice(a_tracks[:min(10, len(a_tracks))])
+                                        subprocess.run([cli, "play", chosen["uri"]], capture_output=True, timeout=1.5)
+                                        played_art = True
+                            if not played_art:
+                                subprocess.run([cli, "play", artists[0]["uri"]], capture_output=True, timeout=1.5)
+                                played_art = True
+                    except Exception:
+                        pass
+
+                # 3. Specific song title search: pick the #1 most relevant studio hit people expect
+                if not played_art:
+                    res_s = subprocess.run([cli, "search", clean_query, "--type", "track", "--format", "json", "--limit", "10"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.8)
+                    if res_s.returncode == 0 and res_s.stdout.strip():
+                        t_data = json.loads(res_s.stdout)
+                        tracks = t_data.get("tracks", [])
+                        if tracks:
+                            if is_some_artist:
+                                chosen = random.choice(tracks[:min(5, len(tracks))])
+                            elif wants_alt:
+                                # Pick alternate/live/acoustic version if available
+                                alt_tracks = [t for t in tracks if any(k in t.get("name", "").lower() for k in ["live", "acoustic", "remix", "version"])]
+                                chosen = alt_tracks[0] if alt_tracks else tracks[0]
+                            else:
+                                # Standard studio hit: prefer exact title without - Live, - Acoustic, etc.
+                                clean_hits = [t for t in tracks if not re.search(r'[-–—]\s*(?:live|acoustic|remix|edit|session|karaoke)', t.get("name", ""), re.IGNORECASE)]
+                                chosen = clean_hits[0] if clean_hits else tracks[0]
+                            subprocess.run([cli, "play", chosen["uri"]], capture_output=True, timeout=1.5)
+                            print(f"[Cursor] Played top relevant hit: '{chosen.get('name')}' by {', '.join(chosen.get('artists', []))}")
+            except Exception as se:
+                print(f"[Cursor] Track play note: {se}")
+
+        # Return cursor cleanly back to user's starting point
+        if orig_cursor:
+            time.sleep(0.1)
+            win32api.SetCursorPos(orig_cursor)
         return True
     except Exception as e:
-        print(f"[Cursor] Spotify visual automation error: {e}")
+        print(f"[Cursor] Spotify visual search error: {e}")
         return False
 
+
 def control_media_with_cursor(action: str = "pause", target_x: int = None, target_y: int = None):
-    """Dynamic media control: glide Twilight's cursor directly to Spotify's playback control button and click."""
+    """Dynamic media control: control Spotify or Windows media playback without moving mouse away."""
     attach_desktop()
-    if not win32gui or not win32api:
+    if not win32api:
         return False
 
     act_lower = action.strip().lower()
-    spotify_hwnd = get_spotify_window()
-    if not spotify_hwnd and act_lower in ("play", "resume"):
-        os.system("start spotify:")
-        for _ in range(40):
-            time.sleep(0.2)
-            sp = get_spotify_window()
-            if sp:
-                spotify_hwnd = sp
-                break
-        time.sleep(1.5)
 
-    btn_map = {
-        "shuffle": 0.42,
-        "previous": 0.465,
-        "prev": 0.465,
-        "back": 0.465,
-        "rewind": 0.465,
-        "play": 0.501,
-        "pause": 0.501,
-        "resume": 0.501,
-        "stop": 0.501,
-        "unpause": 0.501,
-        "next": 0.537,
-        "skip": 0.537,
-        "repeat": 0.58,
-        "lyrics": 0.73,
-        "open lyrics": 0.73,
-        "queue": 0.76,
-    }
+    # If explicit target coordinates were passed, glide hardware cursor and click
+    if target_x is not None and target_y is not None:
+        glide_hardware_cursor(target_x, target_y, action="click", glide_time=0.30)
+        return True
 
-    if spotify_hwnd:
-        try:
-            force_foreground_window(spotify_hwnd)
-            time.sleep(0.12)
-            r = win32gui.GetWindowRect(spotify_hwnd)
-            w = r[2] - r[0]
+    cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+    has_cli = os.path.exists(cli)
 
-            btn_pos = None
+    if act_lower in ("pause", "stop"):
+        if has_cli:
             try:
-                from assistant_tools import ground_screen_element
-                bx, by, _, _ = ground_screen_element(f"Spotify bottom bar {act_lower} button", "spotify")
-                if bx is not None and by is not None:
-                    btn_pos = (bx, by)
+                import subprocess
+                subprocess.run([cli, "pause"], capture_output=True, timeout=1.2)
             except Exception:
                 pass
-
-            ratio = btn_map.get(act_lower, 0.501)
-            px = target_x if (target_x is not None) else (btn_pos[0] if btn_pos else (r[0] + int(w * ratio)))
-            py = target_y if (target_y is not None) else (btn_pos[1] if btn_pos else (r[3] - 65))
-
-            # Visually glide to control button and click
-            glide_hardware_cursor(px, py, action="click", glide_time=0.30)
-            time.sleep(0.04)
-
-            # Secondary shortcuts for track navigation and volume
-            if act_lower in ("next", "skip"):
-                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-                win32api.keybd_event(win32con.VK_RIGHT, 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(win32con.VK_RIGHT, 0, win32con.KEYEVENTF_KEYUP, 0)
-                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-            elif act_lower in ("previous", "prev", "back"):
-                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-                win32api.keybd_event(win32con.VK_LEFT, 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(win32con.VK_LEFT, 0, win32con.KEYEVENTF_KEYUP, 0)
-                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-            elif "volume_up" in act_lower or "louder" in act_lower:
-                for _ in range(3):
-                    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-                    win32api.keybd_event(win32con.VK_UP, 0, 0, 0)
-                    time.sleep(0.02)
-                    win32api.keybd_event(win32con.VK_UP, 0, win32con.KEYEVENTF_KEYUP, 0)
-                    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-            elif "volume_down" in act_lower or "quieter" in act_lower:
-                for _ in range(3):
-                    win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-                    win32api.keybd_event(win32con.VK_DOWN, 0, 0, 0)
-                    time.sleep(0.02)
-                    win32api.keybd_event(win32con.VK_DOWN, 0, win32con.KEYEVENTF_KEYUP, 0)
-                    win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-            elif "shuffle" in act_lower:
-                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-                win32api.keybd_event(ord('S'), 0, 0, 0)
-                time.sleep(0.02)
-                win32api.keybd_event(ord('S'), 0, win32con.KEYEVENTF_KEYUP, 0)
-                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
-            return True
-        except Exception as e:
-            print(f"[Cursor] Media control click error: {e}")
-
-    # Fallback media keys
-    if act_lower in ("pause", "stop", "resume", "play", "unpause"):
         win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
         win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 2, 0)
+        return True
+
+    elif act_lower in ("play", "resume", "unpause"):
+        if has_cli:
+            try:
+                import subprocess
+                subprocess.run([cli, "resume"], capture_output=True, timeout=1.2)
+            except Exception:
+                pass
+        win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 2, 0)
+        return True
+
     elif act_lower in ("next", "skip"):
+        if has_cli:
+            try:
+                import subprocess
+                subprocess.run([cli, "next"], capture_output=True, timeout=1.2)
+            except Exception:
+                pass
         win32api.keybd_event(win32con.VK_MEDIA_NEXT_TRACK, 0, 0, 0)
         win32api.keybd_event(win32con.VK_MEDIA_NEXT_TRACK, 0, 2, 0)
+        return True
+
     elif act_lower in ("previous", "prev", "back", "rewind"):
+        if has_cli:
+            try:
+                import subprocess
+                subprocess.run([cli, "previous"], capture_output=True, timeout=1.2)
+            except Exception:
+                pass
         win32api.keybd_event(win32con.VK_MEDIA_PREV_TRACK, 0, 0, 0)
         win32api.keybd_event(win32con.VK_MEDIA_PREV_TRACK, 0, 2, 0)
+        return True
+
+    elif "shuffle" in act_lower:
+        if has_cli:
+            try:
+                import subprocess
+                subprocess.run([cli, "shuffle", "toggle"], capture_output=True, timeout=1.2)
+            except Exception:
+                pass
+        return True
+
     return True
-
-def scroll_spotify_playlist(direction: str = "down", amount: int = 400):
-    """Smoothly scroll through Spotify playlist tracks or search results."""
-    attach_desktop()
-    if not win32gui or not win32api:
-        return False
-    sp = get_spotify_window()
-    if sp:
-        try:
-            force_foreground_window(sp)
-            time.sleep(0.08)
-            r = win32gui.GetWindowRect(sp)
-            w = r[2] - r[0]
-            h = r[3] - r[1]
-            cx = r[0] + int(w * 0.60)
-            cy = r[1] + int(h * 0.50)
-            glide_hardware_cursor(cx, cy, action="none", glide_time=0.20)
-            time.sleep(0.04)
-
-            d_lower = direction.strip().lower()
-            is_down = any(k in d_lower for k in ("down", "next", "bottom"))
-            clicks = max(1, min(12, int(amount) // 100)) if amount else 4
-            notch = -120 if is_down else 120
-
-            for _ in range(clicks):
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, cx, cy, notch, 0)
-                time.sleep(0.035)
-            return True
-        except Exception as e:
-            print(f"[Cursor] scroll_spotify_playlist error: {e}")
-    return False
 
 def is_terminal_or_overlay_hwnd(h):
     if not h or not win32gui:
@@ -800,85 +933,42 @@ def is_terminal_or_overlay_hwnd(h):
         pass
     return False
 
-def find_active_browser_tab_close_button(hwnd):
-    """Find the exact screen coordinates (x, y) of the active tab's 'x' close button via visual inspection."""
-    try:
-        from PIL import ImageGrab
-        from google import genai
-        from google.genai import types
-        from config import Config
-        cfg = Config.load()
-        if not cfg.api_key:
-            return None, None
-        client = genai.Client(api_key=cfg.api_key)
-        r = win32gui.GetWindowRect(hwnd)
-        t = (win32gui.GetWindowText(hwnd) or "").strip()
-        img = ImageGrab.grab(r)
-        strip = img.crop((0, 0, r[2] - r[0], min(80, r[3] - r[1])))
-        buf = io.BytesIO()
-        strip.save(buf, format="JPEG", quality=80)
-        strip_b = buf.getvalue()
-
-        prompt = (
-            f"This is the top tab strip of the browser window. The active/current tab has title: '{t}'. "
-            "Locate the active tab (the highlighted/light tab), and identify the exact (x, y) coordinates of its close button (the small 'x' icon on that tab). "
-            "Return ONLY JSON: {\"found\": true, \"x\": <int pixel_x_in_image>, \"y\": <int pixel_y_in_image>}"
-        )
-        resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-            contents=[types.Part.from_bytes(data=strip_b, mime_type="image/jpeg"), types.Part.from_text(text=prompt)],
-            config=types.GenerateContentConfig(response_mime_type="application/json")
-        )
-        if resp and resp.text:
-            raw = resp.text.strip()
-            if raw.startswith("```"):
-                raw = re.sub(r'^```(?:json)?\s*', '', raw)
-                raw = re.sub(r'\s*```$', '', raw)
-            d = json.loads(raw)
-            if isinstance(d, list) and d:
-                d = d[0]
-            if d.get("found", True) and "x" in d and "y" in d:
-                px = r[0] + int(d["x"])
-                py = r[1] + int(d["y"])
-                return px, py
-    except Exception as e:
-        print(f"[Cursor] find_active_browser_tab_close_button note: {e}")
-    return None, None
-
 def close_active_browser_tab(target_x: int = None, target_y: int = None):
-    """Visually glide Twilight's cursor to the active tab's close button and click it to close."""
+    """Swift visual cursor automation: glides Twilight's cursor to active tab and closes cleanly with Ctrl+W in 0.15s."""
     attach_desktop()
     if not win32gui or not win32api:
         return False
 
     fg = win32gui.GetForegroundWindow()
-    if not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
+    # Ensure foreground window is actually a browser; if user is in VS Code, Spotify, etc., find the browser
+    is_fg_browser = False
+    if fg and win32gui.IsWindowVisible(fg):
+        try:
+            t = (win32gui.GetWindowText(fg) or "").lower()
+            _, pid = win32process.GetWindowThreadProcessId(fg)
+            pname = psutil.Process(pid).name().lower() if psutil else ""
+            if any(b in t or b in pname for b in ["chrome", "msedge", "brave", "firefox"]):
+                is_fg_browser = True
+        except Exception:
+            pass
+    if not is_fg_browser or not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
         fg = get_browser_window()
 
     if fg:
         try:
             force_foreground_window(fg)
-            time.sleep(0.08)
+            time.sleep(0.04)
             r = win32gui.GetWindowRect(fg)
             w = r[2] - r[0]
-            h = r[3] - r[1]
 
-            tab_x, tab_y = target_x, target_y
-            if tab_x is None or tab_y is None:
-                bx, by = find_active_browser_tab_close_button(fg)
-                if bx is not None and by is not None:
-                    tab_x, tab_y = bx, by
-                else:
-                    tab_x = r[0] + min(w - 150, max(200, int(w * 0.25)))
-                    tab_y = r[1] + 20
+            tab_x = target_x if target_x is not None else (r[0] + min(w - 150, max(200, int(w * 0.25))))
+            tab_y = target_y if target_y is not None else (r[1] + 20)
 
-            # 1. Visually glide Twilight's cursor right onto the active tab close button with click!
-            glide_hardware_cursor(tab_x, tab_y, action="click", glide_time=0.30)
-            time.sleep(0.05)
+            # Swift glide to tab strip
+            glide_hardware_cursor(tab_x, tab_y, action="none", glide_time=0.15)
+            time.sleep(0.02)
 
-            # 2. Re-assert foreground and dispatch Ctrl+W safety guarantee in case click was slightly off
-            force_foreground_window(fg)
-            time.sleep(0.03)
+            # Cleanly dispatch Ctrl+W
             win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
             win32api.keybd_event(ord('W'), 0, 0, 0)
             time.sleep(0.02)
@@ -890,6 +980,7 @@ def close_active_browser_tab(target_x: int = None, target_y: int = None):
             return False
     return False
 
+
 def open_new_browser_tab(url: str = ""):
     """Visually glide Twilight's cursor to the tab strip '+' button and cleanly open with Ctrl+T."""
     attach_desktop()
@@ -897,7 +988,18 @@ def open_new_browser_tab(url: str = ""):
         return False
 
     fg = win32gui.GetForegroundWindow()
-    if not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
+    # Ensure foreground window is actually a browser; if user is in VS Code, Spotify, etc., find the browser
+    is_fg_browser = False
+    if fg and win32gui.IsWindowVisible(fg):
+        try:
+            t = (win32gui.GetWindowText(fg) or "").lower()
+            _, pid = win32process.GetWindowThreadProcessId(fg)
+            pname = psutil.Process(pid).name().lower() if psutil else ""
+            if any(b in t or b in pname for b in ["chrome", "msedge", "brave", "firefox"]):
+                is_fg_browser = True
+        except Exception:
+            pass
+    if not is_fg_browser or not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
         fg = get_browser_window()
 
     if not fg:
@@ -935,15 +1037,23 @@ def open_new_browser_tab(url: str = ""):
         return False
 
 def switch_browser_tab(direction: str = "next"):
-    """Switch browser tab: previous (browser history back) or next (Ctrl+Tab)."""
-    d_lower = (direction or "").strip().lower()
-    if any(k in d_lower for k in ("prev", "previous", "back", "prior", "last")):
-        return browser_navigate_history("back")
+    """Switch browser tab: previous (Ctrl+Shift+Tab) or next (Ctrl+Tab)."""
     attach_desktop()
     if not win32gui or not win32api:
         return False
     fg = win32gui.GetForegroundWindow()
-    if not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
+    # Ensure foreground window is actually a browser; if user is in VS Code, Spotify, etc., find the browser
+    is_fg_browser = False
+    if fg and win32gui.IsWindowVisible(fg):
+        try:
+            t = (win32gui.GetWindowText(fg) or "").lower()
+            _, pid = win32process.GetWindowThreadProcessId(fg)
+            pname = psutil.Process(pid).name().lower() if psutil else ""
+            if any(b in t or b in pname for b in ["chrome", "msedge", "brave", "firefox"]):
+                is_fg_browser = True
+        except Exception:
+            pass
+    if not is_fg_browser or not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
         fg = get_browser_window()
     if not fg:
         return False
@@ -981,7 +1091,18 @@ def browser_navigate_history(direction: str = "back"):
     if not win32gui or not win32api:
         return False
     fg = win32gui.GetForegroundWindow()
-    if not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
+    # Ensure foreground window is actually a browser; if user is in VS Code, Spotify, etc., find the browser
+    is_fg_browser = False
+    if fg and win32gui.IsWindowVisible(fg):
+        try:
+            t = (win32gui.GetWindowText(fg) or "").lower()
+            _, pid = win32process.GetWindowThreadProcessId(fg)
+            pname = psutil.Process(pid).name().lower() if psutil else ""
+            if any(b in t or b in pname for b in ["chrome", "msedge", "brave", "firefox"]):
+                is_fg_browser = True
+        except Exception:
+            pass
+    if not is_fg_browser or not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
         fg = get_browser_window()
     if not fg:
         return False
@@ -1145,8 +1266,9 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
             return True
 
         if act_lower in ("pause", "stop", "play", "resume", "unpause", "toggle_pause"):
-            glide_hardware_cursor(vid_x, vid_y, action="click", glide_time=0.22)
-            time.sleep(0.04)
+            win32api.keybd_event(ord('K'), 0, 0, 0)
+            time.sleep(0.03)
+            win32api.keybd_event(ord('K'), 0, win32con.KEYEVENTF_KEYUP, 0)
             return True
         elif act_lower in ("volume_up", "louder", "up", "raise_volume"):
             glide_hardware_cursor(vid_x, vid_y, action="none", glide_time=0.15)
@@ -1402,7 +1524,18 @@ def scroll_page_with_cursor(direction: str = "down", amount: int = 400, center_t
         return False
 
     fg = win32gui.GetForegroundWindow()
-    if not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
+    # Ensure foreground window is actually a browser; if user is in VS Code, Spotify, etc., find the browser
+    is_fg_browser = False
+    if fg and win32gui.IsWindowVisible(fg):
+        try:
+            t = (win32gui.GetWindowText(fg) or "").lower()
+            _, pid = win32process.GetWindowThreadProcessId(fg)
+            pname = psutil.Process(pid).name().lower() if psutil else ""
+            if any(b in t or b in pname for b in ["chrome", "msedge", "brave", "firefox"]):
+                is_fg_browser = True
+        except Exception:
+            pass
+    if not is_fg_browser or not fg or is_terminal_or_overlay_hwnd(fg) or win32gui.GetWindowRect(fg)[0] <= -10000:
         fg = get_browser_window()
 
     if not fg:

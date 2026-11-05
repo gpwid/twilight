@@ -5,6 +5,8 @@ import io
 import re
 import time
 import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 import datetime
 import shutil
 import random
@@ -12,6 +14,8 @@ import json
 import winreg
 from PIL import ImageGrab
 import httpx
+from bs4 import BeautifulSoup
+import html
 
 try:
     import win32api
@@ -37,69 +41,6 @@ def get_current_time() -> str:
     now = datetime.datetime.now()
     return now.strftime("%I:%M %p on %A, %B %d, %Y")
 
-def web_search(query: str) -> str:
-    """Search for facts, current events, election results, science, movies, or general information, and update the browser to show the search results."""
-    mark_action_tool_executed()
-    try:
-        clean = query.strip()
-        # Automatically update the active browser to show search results visually on screen
-        try:
-            import cursor_assistant
-            search_url = f"https://www.google.com/search?q={urllib.parse.quote(clean)}"
-            cursor_assistant.navigate_browser_with_cursor(search_url)
-            time.sleep(0.35)
-            cursor_assistant.scroll_page_with_cursor("down", 180)
-        except Exception as be:
-            print(f"[Tools] Browser search navigation note: {be}")
-
-        headers = {"User-Agent": "SciTwiAssistant/1.0 (contact: admin@clickassistant.local)"}
-        # First attempt: generator=search to get rich lead extracts with facts, winners, and numbers
-        params = {
-            "action": "query",
-            "generator": "search",
-            "gsrsearch": clean,
-            "gsrlimit": "3",
-            "prop": "extracts",
-            "exintro": "1",
-            "explaintext": "1",
-            "format": "json",
-            "utf8": "1"
-        }
-        resp = httpx.get("https://en.wikipedia.org/w/api.php", params=params, headers=headers, timeout=8.0)
-        if resp.status_code == 200:
-            d = resp.json()
-            pages = d.get("query", {}).get("pages", {})
-            if pages:
-                results = []
-                sorted_pages = sorted(pages.values(), key=lambda p: p.get("index", 99))
-                for p in sorted_pages:
-                    title = p.get("title", "")
-                    extract = (p.get("extract") or "").strip()
-                    if extract:
-                        results.append(f"=== {title} ===\n{extract[:600]}")
-                if results:
-                    print(f"[Tools] Web search succeeded for '{clean}' ({len(results)} rich extracts)")
-                    return "\n\n".join(results)
-
-        # Fallback to standard search list
-        encoded = urllib.parse.quote(clean)
-        url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={encoded}&format=json&utf8=1"
-        resp = httpx.get(url, headers=headers, timeout=8.0)
-        if resp.status_code == 200:
-            data = resp.json()
-            items = data.get("query", {}).get("search", [])
-            if items:
-                snippets = []
-                for item in items[:3]:
-                    clean_text = re.sub(r'<[^>]+>', '', item.get("snippet", ""))
-                    snippets.append(f"{item.get('title')}: {clean_text}")
-                print(f"[Tools] Web search fallback succeeded for '{clean}' ({len(snippets)} results)")
-                return "\n".join(snippets)
-        return f"No verified online search results found for '{query}'. Explicitly state that you could not find confirmed results and do not invent details."
-    except Exception as e:
-        print(f"[Tools] Web search error: {e}")
-        return f"Online search timed out or was unavailable for '{query}'. Explicitly tell the user the search timed out, and do not guess or fabricate winners or numbers."
-
 _LAST_APP: str = ""
 _LAST_ACTION_TOOL_TIME: float = 0.0
 _CURRENT_USER_QUERY: str = ""
@@ -117,6 +58,140 @@ def mark_action_tool_executed():
 
 def get_last_action_tool_time() -> float:
     return _LAST_ACTION_TOOL_TIME
+
+def fetch_live_web_search(query: str) -> str:
+    """Fetch live news, election returns, current events, and encyclopedic background for any query."""
+    clean = query.strip()
+    if not clean:
+        return ""
+    
+    findings = []
+    headers = {"User-Agent": "SciTwiAssistant/1.0 (contact: admin@clickassistant.local)"}
+
+    # Special handling for "random wikipedia"
+    if "random" in clean.lower() and ("wiki" in clean.lower() or "page" in clean.lower() or "article" in clean.lower()):
+        try:
+            wiki_rand_url = "https://en.wikipedia.org/api/rest_v1/page/random/summary"
+            r = httpx.get(wiki_rand_url, headers=headers, timeout=3.5, follow_redirects=True)
+            if r.status_code == 200:
+                data = r.json()
+                t = data.get("title", "")
+                ex = data.get("extract", "")
+                if t and ex:
+                    return f"=== Random Wikipedia Article: {t} ===\n{ex}"
+        except Exception as re_err:
+            print(f"[Tools] Random wiki fetch note: {re_err}")
+
+    # 1. Live breaking news & current event feeds (Google News RSS & Bing News RSS)
+    try:
+        gnews_url = f"https://news.google.com/rss/search?q={urllib.parse.quote(clean)}&hl=en-US&gl=US&ceid=US:en"
+        req = urllib.request.Request(gnews_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            root = ET.fromstring(resp.read())
+            news_items = []
+            for item in root.findall(".//item")[:5]:
+                t = item.find("title").text if item.find("title") is not None else ""
+                desc_el = item.find("description")
+                desc = ""
+                if desc_el is not None and desc_el.text:
+                    desc = html.unescape(re.sub(r'<[^>]+>', ' ', desc_el.text)).strip()
+                    desc = re.sub(r'\s+', ' ', desc)
+                if t:
+                    entry = f"- {t}"
+                    if desc and desc != t:
+                        entry += f": {desc[:250]}"
+                    news_items.append(entry)
+            if news_items:
+                findings.append("=== Live News & Official Reports ===\n" + "\n".join(news_items))
+    except Exception as e:
+        print(f"[Tools] Google News RSS query note: {e}")
+
+    try:
+        bnews_url = f"https://www.bing.com/news/search?q={urllib.parse.quote(clean)}&format=rss"
+        req = urllib.request.Request(bnews_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            root = ET.fromstring(resp.read())
+            bnews_items = []
+            for item in root.findall(".//item")[:3]:
+                t = item.find("title").text if item.find("title") is not None else ""
+                desc_el = item.find("description")
+                desc = ""
+                if desc_el is not None and desc_el.text:
+                    desc = html.unescape(re.sub(r'<[^>]+>', ' ', desc_el.text)).strip()
+                    desc = re.sub(r'\s+', ' ', desc)
+                if t:
+                    entry = f"- {t}"
+                    if desc and desc != t:
+                        entry += f": {desc[:250]}"
+                    bnews_items.append(entry)
+            if bnews_items and not findings:
+                findings.append("=== Live News & Reports ===\n" + "\n".join(bnews_items))
+    except Exception as e:
+        print(f"[Tools] Bing News RSS query note: {e}")
+
+    # 2. Wikipedia API for encyclopedic background, history, science, concepts
+    try:
+        wiki_params = {
+            "action": "query",
+            "generator": "search",
+            "gsrsearch": clean,
+            "gsrlimit": "3",
+            "prop": "extracts",
+            "exintro": "1",
+            "explaintext": "1",
+            "format": "json",
+            "utf8": "1"
+        }
+        wiki_resp = httpx.get("https://en.wikipedia.org/w/api.php", params=wiki_params, headers=headers, timeout=3.0)
+        if wiki_resp.status_code == 200:
+            d = wiki_resp.json()
+            pages = d.get("query", {}).get("pages", {})
+            if pages:
+                wiki_items = []
+                sorted_pages = sorted(pages.values(), key=lambda p: p.get("index", 99))
+                for p in sorted_pages:
+                    w_title = p.get("title", "")
+                    w_extract = (p.get("extract") or "").strip()
+                    if w_extract:
+                        wiki_items.append(f"- {w_title}: {w_extract[:400]}")
+                if wiki_items:
+                    findings.append("=== Encyclopedic Reference ===\n" + "\n".join(wiki_items))
+    except Exception as e:
+        print(f"[Tools] Wikipedia query note: {e}")
+
+    return "\n\n".join(findings)
+
+def web_search(query: str) -> str:
+    """Twilight's internal web search tool. Search live news, current events, election results, facts, science, and encyclopedic information without needing a browser."""
+    mark_action_tool_executed()
+    try:
+        clean = query.strip()
+        print(f"[Tools] Performing live web search for: '{clean}'")
+
+        # Only navigate the active browser if user specifically requested visual / screen display
+        user_q = get_current_user_query().lower()
+        if any(kw in user_q for kw in ["browser", "chrome", "edge", "show me on screen", "pull up on screen", "on my screen"]):
+            try:
+                import cursor_assistant
+                search_url = f"https://www.google.com/search?q={urllib.parse.quote(clean)}"
+                cursor_assistant.navigate_browser_with_cursor(search_url)
+                time.sleep(0.35)
+                cursor_assistant.scroll_page_with_cursor("down", 180)
+            except Exception as be:
+                print(f"[Tools] Browser search navigation note: {be}")
+
+        content = fetch_live_web_search(clean)
+        if content:
+            print(f"[Tools] Web search succeeded for '{clean}' ({len(content)} chars)")
+            return (
+                f"Web search results for '{clean}':\n\n{content}\n\n"
+                "[INSTRUCTION: Answer the user's question directly and immediately using the facts, names, winners, and numbers from this search summary. "
+                "Do NOT stall or claim the data is unknown if it appears above! State the direct answer in your first sentence.]"
+            )
+        return f"No verified online search results found for '{query}'. Explicitly state that you could not find confirmed results and do not invent details."
+    except Exception as e:
+        print(f"[Tools] Web search error: {e}")
+        return f"Online search timed out or was unavailable for '{query}'. Explicitly tell the user the search timed out, and do not guess or fabricate winners or numbers."
 
 def is_process_running(proc_name: str) -> bool:
     """Check if a process is already running on Windows."""
@@ -274,7 +349,7 @@ def open_app(app_name: str) -> str:
     mark_action_tool_executed()
     try:
         global _LAST_APP
-        clean = app_name.strip().lower()
+        clean = re.sub(r'^(?:up\s+|the\s+|an?\s+)', '', app_name.strip().lower()).strip()
         _LAST_APP = clean
 
         # 1. Direct system built-in commands and aliases
@@ -391,7 +466,7 @@ def open_app(app_name: str) -> str:
         return f"Failed to open {app_name}: {e}"
 
 def close_app(app_name: str) -> str:
-    """Close or terminate an active Windows application or window by name (e.g. 'gimp', 'spotify', 'chrome', 'discord', 'notepad', 'calculator', 'vscode', 'task manager').
+    """Close or terminate an active Windows application or window by name (e.g. 'gimp', 'affinity photo', 'spotify', 'chrome', 'discord', 'notepad', 'calculator', 'vscode', 'task manager').
     
     IMPORTANT: ONLY call this when the user explicitly instructs to close, quit, exit, terminate, or kill an app, or asks to close/kill an app via Task Manager."""
     global _LAST_APP
@@ -433,6 +508,9 @@ def close_app(app_name: str) -> str:
             "firefox": ["firefox.exe"],
             "edge": ["msedge.exe"],
             "msedge": ["msedge.exe"],
+            "brave": ["brave.exe"],
+            "opera": ["opera.exe"],
+            "vivaldi": ["vivaldi.exe"],
             "notepad": ["notepad.exe"],
             "calculator": ["calculatorapp.exe", "calc.exe"],
             "calc": ["calculatorapp.exe", "calc.exe"],
@@ -451,7 +529,11 @@ def close_app(app_name: str) -> str:
             "word": ["winword.exe"],
             "excel": ["excel.exe"],
             "powerpoint": ["powerpnt.exe"],
-            "gimp": ["gimp-3.exe", "gimp-2.10.exe", "gimp.exe"],
+            "gimp": ["gimp-3.exe", "gimp-2.10.exe", "gimp.exe", "script-fu.exe", "gimp-console.exe", "gimp-debug-tool.exe"],
+            "affinity": ["photo.exe", "designer.exe", "publisher.exe", "affinity.exe", "affinityphoto.exe", "affinitydesigner.exe", "affinitypublisher.exe"],
+            "affinity photo": ["photo.exe", "affinityphoto.exe", "affinity.exe"],
+            "affinity designer": ["designer.exe", "affinitydesigner.exe", "affinity.exe"],
+            "affinity publisher": ["publisher.exe", "affinitypublisher.exe", "affinity.exe"],
             "photoshop": ["photoshop.exe"],
             "illustrator": ["illustrator.exe"],
             "premiere": ["adobe premiere pro.exe"],
@@ -460,12 +542,17 @@ def close_app(app_name: str) -> str:
             "obs": ["obs64.exe", "obs32.exe", "obs.exe"],
             "war thunder": ["aces.exe", "launcher.exe", "warthunder.exe"],
             "warthunder": ["aces.exe", "launcher.exe", "warthunder.exe"],
+            "figma": ["figma.exe"],
         }
+
+        # Check browser identity upfront to safeguard session state
+        is_browser = any(b in clean for b in ("chrome", "google chrome", "firefox", "edge", "msedge", "browser", "brave", "opera", "vivaldi"))
+        is_force = bool(re.search(r'\b(kill|force|terminate|crash)\b', app_name.lower()))
 
         target_names = set(app_aliases.get(clean, []))
         target_pids = set()
 
-        # 1. Scan running processes to find all matching PIDs and executable names
+        # 1. Scan running processes: identify primary matching processes and trace parent/child tree
         clean_no_space = clean.replace(" ", "")
         try:
             import psutil
@@ -473,109 +560,198 @@ def close_app(app_name: str) -> str:
                 try:
                     p_name = p.info['name'].lower()
                     p_exe = (p.info['exe'] or '').lower()
-                    if (p_name in target_names or
+
+                    # Protect Edge WebView2 background runtime when targeting Edge browser
+                    if "msedgewebview2" in p_name and "webview" not in clean:
+                        continue
+
+                    matched = (
+                        p_name in target_names or
                         clean == p_name or
                         clean == p_name.replace(".exe", "") or
                         (len(clean) >= 3 and clean in p_name) or
                         (len(clean_no_space) >= 3 and clean_no_space in p_name.replace("-", "").replace("_", "")) or
-                        (p_exe and clean in p_exe)):
+                        (p_exe and clean in p_exe) or
+                        ("affinity" in clean and ("photo.exe" in p_name or "designer.exe" in p_name or "publisher.exe" in p_name or "affinity" in p_exe or "serif" in p_exe)) or
+                        ("gimp" in clean and ("gimp" in p_name or "script-fu" in p_name or "gimp" in p_exe))
+                    )
+                    if matched:
                         target_pids.add(p.info['pid'])
-                        target_names.add(p.info['name'])
+                        target_names.add(p_name)
+                        # Identify all child instances (e.g. plugins, renderers, script engines)
+                        try:
+                            for child in p.children(recursive=True):
+                                target_pids.add(child.pid)
+                                target_names.add(child.name().lower())
+                        except Exception:
+                            pass
+                        # Identify parent instance (e.g. project launcher or splash screen)
+                        try:
+                            parent = p.parent()
+                            if parent and parent.pid > 4:
+                                par_name = parent.name().lower()
+                                par_exe = (parent.exe() or '').lower()
+                                if any(k in par_name or k in par_exe for k in [clean, "affinity", "gimp", "warthunder", "steam", "launcher"]):
+                                    target_pids.add(parent.pid)
+                                    target_names.add(par_name)
+                        except Exception:
+                            pass
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception as e:
             print(f"[Tools] Process scanning error: {e}")
 
-        # 2. Scan visible top-level windows: if any window title matches, capture its PID
+        # 2. Scan visible top-level windows: capture secondary windows, project launchers, or splash screens
+        target_hwnds = set()
         try:
             import win32gui
             import win32process
             import win32con
 
             def enum_cb(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd).strip().lower()
-                    if title and (clean in title or any(t.replace(".exe", "") in title for t in target_names)):
-                        try:
-                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                try:
+                    if win32gui.IsWindowVisible(hwnd):
+                        title = win32gui.GetWindowText(hwnd).strip().lower()
+                        cls = win32gui.GetClassName(hwnd).lower()
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        
+                        # Match window by title/class or associated PID
+                        title_match = bool(title and (clean in title or any(t.replace(".exe", "") in title for t in target_names)))
+                        class_match = bool(any(k in cls for k in [clean, "gimp", "chrome_widgetwin", "affinity"]))
+                        pid_match = bool(pid in target_pids)
+
+                        if pid_match or title_match or class_match:
                             if pid > 4:
                                 target_pids.add(pid)
-                        except Exception:
-                            pass
-            win32gui.EnumWindows(enum_cb, None)
+                                try:
+                                    proc = psutil.Process(pid)
+                                    target_names.add(proc.name().lower())
+                                    for ch in proc.children(recursive=True):
+                                        target_pids.add(ch.pid)
+                                except Exception:
+                                    pass
+                            target_hwnds.add(hwnd)
+                except Exception:
+                    pass
+                return True
+
+            try:
+                win32gui.EnumWindows(enum_cb, None)
+            except Exception:
+                pass
         except Exception as e:
             print(f"[Tools] Window scan error: {e}")
 
-        if not target_pids and not target_names:
+        if not target_pids and not target_names and not target_hwnds:
             return f"Could not find an active window or process for '{app_name}' to close."
 
-        # 3. Graceful closure: send WM_CLOSE to top-level windows belonging to target PIDs
+        # 3. Phase 1: Graceful Exit Signal
+        # For Chrome and web browsers: send WM_CLOSE and WM_SYSCOMMAND to all top-level windows to save active sessions cleanly.
+        # NEVER use an abrupt force-kill command on Chrome.
         closed_windows = 0
         try:
-            def close_cb(hwnd, _):
-                nonlocal closed_windows
+            for hwnd in list(target_hwnds):
                 try:
-                    if win32gui.IsWindowVisible(hwnd) and win32gui.GetParent(hwnd) == 0:
-                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                        if pid in target_pids:
-                            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-                            closed_windows += 1
+                    if win32gui.IsWindow(hwnd):
+                        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                        win32gui.PostMessage(hwnd, win32con.WM_SYSCOMMAND, win32con.SC_CLOSE, 0)
+                        closed_windows += 1
                 except Exception:
                     pass
-            win32gui.EnumWindows(close_cb, None)
         except Exception as e:
-            print(f"[Tools] WM_CLOSE attempt: {e}")
+            print(f"[Tools] WM_CLOSE graceful signal error: {e}")
 
-        # Check if user asked to forcibly kill vs gracefully close
-        is_force = bool(re.search(r'\b(kill|force|terminate|crash)\b', app_name.lower()))
-        is_browser = any(b in clean for b in ("chrome", "firefox", "edge", "browser", "brave", "opera")) or any(
-            any(bb in t.lower() for bb in ("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe"))
-            for t in target_names
-        )
-
-        # Wait for processes to exit cleanly after WM_CLOSE (browsers need ~1-2s to flush session state)
-        wait_timeout = 0.5 if is_force else (3.0 if is_browser else 1.5)
+        # Wait loop for clean exit (browsers need up to 4s to flush session state, sqlite db, cookies, tabs)
+        wait_timeout = 0.5 if is_force else (4.5 if is_browser else 1.8)
         t_end = time.time() + wait_timeout
         while time.time() < t_end:
             alive_pids = [p for p in target_pids if psutil.pid_exists(p)]
             if not alive_pids:
                 break
-            time.sleep(0.2)
+            time.sleep(0.25)
 
-        # 4. Only enforce taskkill /F if user requested force kill, or if non-browser apps are still stuck after timeout
-        killed = []
-        alive_pids = [p for p in target_pids if psutil.pid_exists(p)]
-        if alive_pids and (is_force or not is_browser):
-            for pid in alive_pids:
-                try:
-                    res = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace")
-                    if res.returncode == 0:
-                        killed.append(str(pid))
-                    else:
-                        try:
-                            p = psutil.Process(pid)
-                            for child in p.children(recursive=True):
+        # 4. Phase 2: Complete Termination for Non-Browser Apps
+        # For applications with multi-processes, secondary windows, launchers, or splash screens (like GIMP or Affinity Photo):
+        # Terminate all remaining parent and child instances completely.
+        if not is_browser or is_force:
+            alive_pids = [p for p in target_pids if psutil.pid_exists(p)]
+            if alive_pids:
+                for pid in alive_pids:
+                    try:
+                        # Terminate child instances first, then parent instance
+                        p = psutil.Process(pid)
+                        for child in p.children(recursive=True):
+                            try:
                                 child.kill()
+                            except Exception:
+                                pass
+                        try:
                             p.kill()
-                            killed.append(str(pid))
                         except Exception:
                             pass
-                except Exception as e:
-                    print(f"[Tools] Termination error for PID {pid}: {e}")
-
-        if (not is_browser or is_force) and (alive_pids or is_force):
-            for name in list(target_names):
-                if is_process_running(name):
+                    except Exception:
+                        pass
+                    # Tree-kill via Windows taskkill (/T terminates specified process and any child processes)
                     try:
-                        res = subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, text=True, encoding="utf-8", errors="replace")
-                        if res.returncode == 0:
-                            killed.append(name)
+                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, text=True, encoding="utf-8", errors="replace")
                     except Exception:
                         pass
 
+                # Terminate any remaining processes by executable image name
+                for name in list(target_names):
+                    if is_process_running(name):
+                        try:
+                            subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                        except Exception:
+                            pass
+                time.sleep(0.4)
+
+        # 5. Phase 3: Verification of Full Shutdown Before Reporting Success
+        remaining_pids = [p for p in target_pids if psutil.pid_exists(p)]
+        remaining_names = [n for n in target_names if is_process_running(n)]
+        
+        # Verify active windows are completely closed
+        remaining_windows = []
+        try:
+            def verify_cb(hwnd, _):
+                try:
+                    if win32gui.IsWindowVisible(hwnd):
+                        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                        w_title = win32gui.GetWindowText(hwnd).strip()
+                        r = win32gui.GetWindowRect(hwnd)
+                        w_dim = r[2] - r[0]
+                        h_dim = r[3] - r[1]
+                        if w_dim > 100 and h_dim > 100:
+                            if pid in target_pids or (w_title and clean in w_title.lower()):
+                                remaining_windows.append(f"{w_title or 'Window'} (PID {pid})")
+                except Exception:
+                    pass
+                return True
+
+            try:
+                win32gui.EnumWindows(verify_cb, None)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[Tools] Post-close window verification note: {e}")
+
         _LAST_APP = clean
-        print(f"[Tools] Closed {app_name}: windows={closed_windows}, killed_pids/images={killed}")
-        return f"Successfully closed {clean.capitalize() if clean else app_name}."
+        app_disp = clean.title() if clean else app_name.title()
+
+        # Check if shutdown was completely verified
+        if not remaining_pids and not remaining_names and not remaining_windows:
+            print(f"[Tools] Successfully verified complete shutdown of {app_name}: 0 processes, 0 windows remaining.")
+            if is_browser:
+                return f"Successfully closed {app_disp} (active session and tabs saved cleanly)."
+            return f"Successfully closed {app_disp}."
+        
+        # If still running: report the true state accurately rather than merely reporting success
+        if is_browser:
+            print(f"[Tools] Browser {app_name} still active after graceful signal (tabs/session preserved).")
+            return f"{app_disp} is still open (waiting on an unsaved tab or confirmation dialog; session preserved without force-kill)."
+        else:
+            print(f"[Tools] App {app_name} termination incomplete: pids={remaining_pids}, names={remaining_names}, windows={remaining_windows}")
+            return f"{app_disp} could not be completely closed (some background processes or windows remain active)."
     except Exception as e:
         print(f"[Tools] Error closing {app_name}: {e}")
         return f"Failed to close {app_name}: {e}"
@@ -678,19 +854,22 @@ def get_playlist_details(playlist_uri: str) -> dict:
     return {}
 
 def ensure_spotify_running():
-    """Ensure Spotify desktop client is launched and ready."""
+    """Ensure Spotify desktop client is launched, rendered, and ready."""
     exe = os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe")
     if not is_process_running("Spotify.exe"):
         print("[Tools] Starting Spotify desktop client...")
         if os.path.exists(exe):
             os.startfile(exe)
         else:
-            open_app("spotify")
-        for _ in range(8):
-            time.sleep(0.2)
-            if is_process_running("Spotify.exe"):
-                break
-        time.sleep(0.8)
+            try:
+                os.startfile("spotify:")
+            except Exception:
+                pass
+        try:
+            import cursor_assistant
+            cursor_assistant.ensure_spotify_window_ready(timeout=7.0)
+        except Exception:
+            time.sleep(2.0)
 
 def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> str:
     """Search and play a song, artist, album, or track on Spotify.
@@ -729,10 +908,18 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
         clean = re.sub(r'^(?:by|from)\s+', '', clean, flags=re.IGNORECASE).strip()
         clean = re.sub(r'\s+', ' ', clean).strip()
 
-        # Trigger Capri-style visual cursor automation synchronously
+        # Route playlist requests directly to play_playlist
+        if "playlist" in query.lower() or "playlist" in clean.lower():
+            return play_playlist(clean or query)
+        pl_uri, pl_name = find_user_playlist(clean)
+        if pl_uri:
+            return play_playlist(pl_name)
+
+        # Trigger Capri-style visual cursor automation asynchronously for sub-100ms tool response
         try:
             import cursor_assistant
-            cursor_assistant.search_and_play_spotify(clean)
+            import threading
+            threading.Thread(target=cursor_assistant.search_and_play_spotify, args=(clean,), daemon=True).start()
             return f"Playing '{clean}' on Spotify! I've searched for it and clicked play with my cursor."
         except Exception as ce:
             print(f"[Tools] cursor_assistant visual spotify error: {ce}")
@@ -954,20 +1141,55 @@ def seek_spotify(timestamp: str) -> str:
         print(f"[Tools] seek_spotify error: {e}")
         return f"Failed to seek in current track: {e}"
 
+def find_user_playlist(playlist_name: str) -> tuple[str | None, str | None]:
+    """Search user's saved Spotify library playlists for an exact or substring match."""
+    cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+    if not os.path.exists(cli) or not playlist_name:
+        return None, None
+    clean = re.sub(r'^(?:my|the)\s+', '', playlist_name.strip(), flags=re.IGNORECASE).strip()
+    clean_lower = clean.lower()
+    clean_no_pl = re.sub(r'\s+playlists?$', '', clean_lower).strip()
+
+    try:
+        res = subprocess.run([cli, "library", "list", "--type", "playlist", "--format", "json", "--limit", "100"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5)
+        if res.returncode == 0 and res.stdout.strip():
+            data = json.loads(res.stdout)
+            items = data.get("items", [])
+            for p in items:
+                pname = (p.get("name") or "").strip().lower()
+                if pname and (pname == clean_lower or pname == clean_no_pl):
+                    return p.get("uri"), p.get("name")
+            for p in items:
+                pname = (p.get("name") or "").strip().lower()
+                if pname and (clean_no_pl in pname or clean_lower in pname or pname in clean_lower):
+                    return p.get("uri"), p.get("name")
+    except Exception as e:
+        print(f"[Tools] find_user_playlist note: {e}")
+    return None, None
+
 def play_playlist(name: str = "") -> str:
     """Play a playlist on Spotify with visual cursor automation."""
     mark_action_tool_executed()
     try:
         clean = (name or "").strip()
+        cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+        user_uri, user_name = find_user_playlist(clean)
+        if user_uri and os.path.exists(cli):
+            ensure_spotify_running()
+            subprocess.run([cli, "play", user_uri], capture_output=True, timeout=1.8)
+            subprocess.run([cli, "navigate", user_uri], capture_output=True, timeout=1.8)
+            import cursor_assistant
+            cursor_assistant.play_spotify_playlist_with_cursor(user_name or clean)
+            return f"Playing your playlist '{user_name or clean}' on Spotify! I've glided to it and pressed play with my cursor."
+
         clean = re.sub(r'^(?:(?:play|open|put on)\s+)?(?:one of\s+)?(?:my\s+)?playlists?\s*', '', clean, flags=re.IGNORECASE).strip()
         import cursor_assistant
-        cursor_assistant.play_spotify_playlist_with_cursor(clean)
+        import threading
+        threading.Thread(target=cursor_assistant.play_spotify_playlist_with_cursor, args=(clean,), daemon=True).start()
         if clean:
             return f"Playing your playlist '{clean}' on Spotify! I've glided to it and pressed play with my cursor."
         return "Playing one of your playlists from the Spotify sidebar! I've selected it and pressed play with my cursor."
     except Exception as e:
-        print(f"[Tools] play_playlist error: {e}")
-        return f"Failed to play playlist: {e}"
         print(f"[Tools] play_playlist error: {e}")
         return f"Failed to play playlist: {e}"
 
@@ -1034,9 +1256,15 @@ def play_youtube(query: str, auto_play: bool = True) -> str:
                 watch_url = f"https://www.youtube.com/watch?v={vid}&autoplay=1"
                 chan_str = f" by {channel}" if channel else ""
                 dur_str = f" ({duration})" if duration else ""
-                print(f"[Tools] Playing YouTube video: {watch_url} ({title}{chan_str})")
+                safe_title = (title or clean).encode('ascii', 'replace').decode('ascii')
+                safe_chan = chan_str.encode('ascii', 'replace').decode('ascii')
+                print(f"[Tools] Playing YouTube video: {watch_url} ({safe_title}{safe_chan})")
                 script_path = os.path.join(os.path.dirname(__file__), "cursor_assistant.py")
                 subprocess.Popen([sys.executable, script_path, "--nav-browser", watch_url, "--is-video"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                try:
+                    os.startfile(watch_url)
+                except Exception:
+                    pass
                 return f"Playing '{title or clean}'{chan_str}{dur_str} on YouTube (URL: {watch_url})."
 
         # 2. Search results page with Capri-style visual cursor navigation
@@ -1051,7 +1279,7 @@ def play_youtube(query: str, auto_play: bool = True) -> str:
         return f"Failed to play YouTube video for '{query}': {e}"
 
 def open_url(url: str) -> str:
-    """Open any website, URL, or domain in the default web browser, and fetch its title and content summary so you can read and discuss it (e.g. 'wikipedia.org', 'https://en.wikipedia.org/wiki/Special:Random', 'google.com', 'https://github.com')."""
+    """Open any website, URL, or domain in the default web browser, and fetch its live content summary so you can read and discuss it (e.g. 'wikipedia.org', 'google.com/search?q=...', 'https://github.com')."""
     try:
         import httpx
         import html
@@ -1063,6 +1291,27 @@ def open_url(url: str) -> str:
         final_url = clean
         title = ""
         excerpt = ""
+
+        # Check if the URL is a search engine URL (Google, Bing, Yahoo, DuckDuckGo)
+        is_search_engine = any(se in clean.lower() for se in [
+            "google.com/search", "bing.com/search", "search.yahoo.com", "duckduckgo.com"
+        ])
+        if is_search_engine:
+            try:
+                parsed = urllib.parse.urlparse(clean)
+                qs = urllib.parse.parse_qs(parsed.query)
+                search_q = qs.get("q", [""])[0] or qs.get("p", [""])[0] or qs.get("query", [""])[0]
+                if not search_q:
+                    m_sq = re.search(r'[?&](?:q|p|query)=([^&#]+)', clean)
+                    if m_sq:
+                        search_q = urllib.parse.unquote(m_sq.group(1))
+                if search_q:
+                    title = f"Search results for '{search_q}'"
+                    live_search_text = fetch_live_web_search(search_q)
+                    if live_search_text:
+                        excerpt = live_search_text
+            except Exception as se_err:
+                print(f"[Tools] Search engine URL query extraction note: {se_err}")
 
         is_wiki = "wikipedia.org" in clean.lower()
         if is_wiki:
@@ -1108,8 +1357,8 @@ def open_url(url: str) -> str:
         script_path = os.path.join(os.path.dirname(__file__), "cursor_assistant.py")
         subprocess.Popen([sys.executable, script_path, "--nav-browser", final_url], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
-        # For non-Wikipedia URLs, do a fast title/description fetch
-        if not is_wiki:
+        # For non-Wikipedia, non-search URLs, do a rich text fetch with BeautifulSoup
+        if not is_wiki and not is_search_engine:
             try:
                 resp = httpx.get(
                     clean,
@@ -1118,27 +1367,27 @@ def open_url(url: str) -> str:
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     },
                     follow_redirects=True,
-                    timeout=2.5
+                    timeout=3.0
                 )
                 if resp.status_code == 200:
-                    html_text = resp.text[:120000]
-                    m_title = re.search(r'<title[^>]*>(.*?)</title>', html_text, re.IGNORECASE | re.DOTALL)
-                    if m_title:
-                        title = html.unescape(re.sub(r'\s+', ' ', m_title.group(1))).strip()
-                    m_desc = re.search(r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\'](.*?)["\']', html_text, re.IGNORECASE)
-                    if m_desc:
-                        excerpt = html.unescape(m_desc.group(1)).strip()
-                    if len(excerpt) < 150:
-                        paras = re.findall(r'<p[^>]*>(.*?)</p>', html_text, re.IGNORECASE | re.DOTALL)
-                        clean_paras = []
-                        for p in paras:
-                            txt = html.unescape(re.sub(r'<[^>]+>', '', p)).strip()
-                            if len(txt) > 40:
-                                clean_paras.append(txt)
-                            if len(clean_paras) >= 3:
-                                break
-                        if clean_paras:
-                            excerpt = (excerpt + "\n\n" if excerpt else "") + "\n\n".join(clean_paras)
+                    soup = BeautifulSoup(resp.text[:250000], "html.parser")
+                    for s in soup(["script", "style", "nav", "header", "footer", "aside", "noscript", "svg"]):
+                        s.decompose()
+                    title_tag = soup.find("title")
+                    if title_tag and title_tag.string:
+                        title = title_tag.string.strip()
+                    meta = soup.find("meta", attrs={"name": re.compile(r"description", re.I)}) or soup.find("meta", attrs={"property": re.compile(r"og:description", re.I)})
+                    if meta and meta.get("content"):
+                        excerpt = meta["content"].strip()
+                    main_el = soup.find("main") or soup.find("article") or soup.find("div", id=re.compile(r"content|main", re.I)) or soup.body
+                    if main_el:
+                        body_text = ' '.join(main_el.stripped_strings)
+                        body_text = re.sub(r'\s+', ' ', body_text).strip()
+                        if body_text:
+                            if excerpt:
+                                excerpt += "\n\n" + body_text[:1200]
+                            else:
+                                excerpt = body_text[:1500]
             except Exception as ext_err:
                 print(f"[Tools] Generic web page fetch note: {ext_err}")
 
@@ -1150,7 +1399,7 @@ def open_url(url: str) -> str:
                 page_info += f"Content Summary:\n{excerpt}\n"
             page_info += (
                 "\n[INSTRUCTION: Answer the user's question directly and immediately using the facts, names, winners, and numbers from this content summary. "
-                "Do NOT stall or claim the data is still being tabulated if the winner or answer is stated in the summary above! State the direct answer in your first sentence.]"
+                "Do NOT stall, do NOT claim the election or event hasn't happened yet, and do NOT claim data is missing if stated above. State the direct answer in your first sentence.]"
             )
             return page_info
         else:
@@ -1292,15 +1541,95 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
     cursor_assistant.attach_desktop()
     target_lower = target_description.lower().strip()
 
-    # Determine context window: user focus is king
+    # Fast tool dock lookups for creative apps (Photoshop, Affinity Designer, Figma)
+    fg_title, fg_pname, fg_hwnd = get_active_app_info()
     if app_name:
         focus_app_window(app_name)
+        fg_hwnd = win32gui.GetForegroundWindow() if win32gui else None
+        active_title = (win32gui.GetWindowText(fg_hwnd) or "").lower() if fg_hwnd else ""
     else:
-        fg_title, fg_pname, fg_hwnd = get_active_app_info()
         app_name = fg_pname or fg_title
+        active_title = (fg_title or "").lower()
 
     screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN) if win32api else 1920
     screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN) if win32api else 1080
+
+    # 1. Photoshop Fast Path
+    if "photoshop" in active_title or "photoshop" in (app_name or "").lower():
+        p_rect = win32gui.GetWindowRect(fg_hwnd) if fg_hwnd else (0, 0, screen_w, screen_h)
+        tool_x = p_rect[0] + 28
+        tool_slots = {
+            ("move", "v tool", "pointer"): (0, "Move Tool (V)"),
+            ("marquee", "rect marquee", "elliptical marquee", "select"): (1, "Marquee Tool (M)"),
+            ("lasso", "polygon lasso", "magnetic lasso"): (2, "Lasso Tool (L)"),
+            ("magic wand", "quick selection", "object selection"): (3, "Object Selection Tool (W)"),
+            ("crop", "perspective crop"): (4, "Crop Tool (C)"),
+            ("frame tool",): (5, "Frame Tool (K)"),
+            ("eyedropper", "color picker"): (6, "Eyedropper Tool (I)"),
+            ("healing", "spot healing", "patch"): (7, "Healing Brush (J)"),
+            ("brush", "paint brush", "pencil"): (8, "Brush Tool (B)"),
+            ("clone", "stamp"): (9, "Clone Stamp Tool (S)"),
+            ("history brush",): (10, "History Brush (Y)"),
+            ("eraser",): (11, "Eraser Tool (E)"),
+            ("gradient", "paint bucket", "bucket"): (12, "Gradient Tool (G)"),
+            ("blur", "sharpen", "smudge"): (13, "Blur Tool"),
+            ("dodge", "burn", "sponge"): (14, "Dodge Tool (O)"),
+            ("pen", "fountain pen", "pen tool"): (15, "Pen Tool (P)"),
+            ("text", "type", "font", "t tool"): (16, "Horizontal Type Tool (T)"),
+            ("path selection", "direct selection"): (17, "Path Selection Tool (A)"),
+            ("shape", "rectangle", "ellipse", "polygon", "custom shape"): (18, "Rectangle Tool (U)"),
+            ("hand", "view", "pan"): (19, "Hand Tool (H)"),
+            ("zoom", "magnify"): (20, "Zoom Tool (Z)"),
+        }
+        for keys, (slot, label_name) in tool_slots.items():
+            if any(k in target_lower for k in keys):
+                tool_y = p_rect[1] + 95 + slot * 32
+                return tool_x, tool_y, label_name, f"Located on Photoshop's left vertical toolbar (slot {slot + 1})."
+
+    # 2. Affinity Designer Fast Path
+    if "affinity" in active_title or "affinity" in (app_name or "").lower() or "designer" in active_title:
+        a_rect = win32gui.GetWindowRect(fg_hwnd) if fg_hwnd else (0, 0, screen_w, screen_h)
+        tool_x = a_rect[0] + 24
+        tool_x = a_rect[0] + 26
+        tool_slots_aff = {
+            ("move", "v tool", "pointer"): (0, "Move Tool (V)"),
+            ("node", "a tool"): (1, "Node Tool (A)"),
+            ("pen", "fountain pen", "pen tool"): (2, "Pen Tool (P)"),
+            ("contour", "point transform"): (3, "Contour Tool (J)"),
+            ("corner",): (4, "Corner Tool (C)"),
+            ("pencil",): (5, "Pencil Tool (N)"),
+            ("brush", "vector brush"): (6, "Vector Brush Tool (B)"),
+            ("fill", "gradient"): (7, "Fill Tool (G)"),
+            ("transparency",): (8, "Transparency Tool (Y)"),
+            ("crop", "vector crop"): (9, "Vector Crop Tool"),
+            ("shape", "rectangle", "ellipse"): (10, "Shape Tool (M)"),
+            ("text", "artistic text", "type"): (11, "Artistic Text Tool (T)"),
+            ("color picker", "eyedropper"): (12, "Color Picker Tool"),
+            ("hand", "view"): (13, "View Tool (H)"),
+            ("zoom",): (14, "Zoom Tool (Z)"),
+        }
+        for keys, (slot, label_name) in tool_slots_aff.items():
+            if any(k in target_lower for k in keys):
+                tool_y = a_rect[1] + 138 + slot * 34
+                return tool_x, tool_y, label_name, f"Located on Affinity Designer's left vertical toolbar."
+
+    # 3. Figma Fast Path
+    if "figma" in active_title or "figma" in (app_name or "").lower():
+        f_rect = win32gui.GetWindowRect(fg_hwnd) if fg_hwnd else (0, 0, screen_w, screen_h)
+        fw = max(400, f_rect[2] - f_rect[0])
+        bottom_y = f_rect[3] - 44
+        if "pen" in target_lower or "pencil" in target_lower:
+            return f_rect[0] + int(0.447 * fw), bottom_y, "Pen Tool (P)", "Pen tool on Figma UI3 bottom dock."
+        if any(s in target_lower for s in ("shape", "rect", "square", "ellipse", "circle", "polygon", "star")):
+            return f_rect[0] + int(0.409 * fw), bottom_y, "Shape Tools (R/O)", "Shape tool on Figma UI3 bottom dock."
+        if "text" in target_lower or "type" in target_lower:
+            return f_rect[0] + int(0.485 * fw), bottom_y, "Text Tool (T)", "Text tool on Figma UI3 bottom dock."
+        if any(m in target_lower for m in ("move", "select", "pointer", "cursor", "v tool")):
+            return f_rect[0] + int(0.370 * fw), bottom_y, "Move Tool (V)", "Selection tool on Figma UI3 bottom dock."
+        if "frame" in target_lower or "slice" in target_lower:
+            return f_rect[0] + int(0.428 * fw), bottom_y, "Frame Tool (F)", "Frame tool on Figma UI3 bottom dock."
+        if "hand" in target_lower:
+            return f_rect[0] + int(0.505 * fw), bottom_y, "Hand Tool (H)", "Hand tool on Figma UI3 bottom dock."
 
     # 1. Fast Path: Universal Titlebar Controls (ONLY for full window close/minimize)
     if win32gui and "tab" not in target_lower and not any(k in target_lower for k in ["pen", "shape", "text", "tool", "brush", "pencil", "play", "search", "button"]):
@@ -1346,7 +1675,7 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
             'Coordinates must be normalized integers 0-1000. If not visible on screen, return {"found": false, "guidance": "why not found"}.'
         )
 
-        models_to_try = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite"]
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash"]
 
         def call_coarse():
             for m in models_to_try:
@@ -1572,16 +1901,13 @@ def open_new_tab(url: str = "") -> str:
         return f"Error opening new tab: {e}"
 
 def switch_tab(direction: str = "next") -> str:
-    """Switch tabs in the active browser or editor. If 'previous'/'back' is requested, navigates back in browser history (as users refer to previous page)."""
+    """Switch tabs in the active browser or editor ('next' for Ctrl+Tab, 'prev'/'previous' for Ctrl+Shift+Tab)."""
     mark_action_tool_executed()
     try:
         import cursor_assistant
-        d_lower = direction.strip().lower()
-        if any(k in d_lower for k in ("prev", "previous", "back", "prior", "last")):
-            cursor_assistant.browser_navigate_history("back")
-            return "Navigated back in your browser for you."
         cursor_assistant.switch_browser_tab(direction)
-        return "Switched to the next tab for you."
+        d_str = "previous" if any(k in direction.lower() for k in ("prev", "previous", "left", "back", "prior")) else "next"
+        return f"Switched to the {d_str} tab for you."
     except Exception as e:
         return f"Error switching tab: {e}"
 

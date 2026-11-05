@@ -270,6 +270,7 @@ class SciTwiOverlay:
 
         # In-UI Response Display (Speech Bubble)
         self.show_response = False
+        self.is_processing = False
         self.response_text = ""
         self.response_lines = []
         self.response_query = ""
@@ -630,6 +631,8 @@ class SciTwiOverlay:
 
     def dismiss_response(self):
         """Dismiss the on-screen speech bubble."""
+        if getattr(self, "is_processing", False):
+            return  # Protect against premature dismissal while background request/tool is running
         self.show_response = False
         self.set_state("idle")
 
@@ -818,15 +821,18 @@ class SciTwiOverlay:
 
         # Auto-close speech bubble after reading duration (scaled by length, pause while hovering/scrolling)
         if self.show_response:
-            words = len(self.response_text.split())
-            read_duration = max(8.0, min(28.0, 4.5 + words * 0.35))
-            mx, my = pygame.mouse.get_pos()
-            is_hovering = resp_card_rect.collidepoint(mx, my)
-            if is_hovering:
-                self.last_response_hover_time = time.time()
-            hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 4.0
-            if (not is_hovering and not hover_cushion) and (time.time() - self.response_start_time > read_duration):
-                self.dismiss_response()
+            if getattr(self, "is_processing", False):
+                self.response_start_time = time.time()  # Keep persistently open while processing
+            else:
+                words = len(self.response_text.split())
+                read_duration = max(8.0, min(28.0, 4.5 + words * 0.35))
+                mx, my = pygame.mouse.get_pos()
+                is_hovering = resp_card_rect.collidepoint(mx, my)
+                if is_hovering:
+                    self.last_response_hover_time = time.time()
+                hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 4.0
+                if (not is_hovering and not hover_cushion) and (time.time() - self.response_start_time > read_duration):
+                    self.dismiss_response()
 
         # Safety: if user released mouse button anywhere in Windows while dragging, release drag
         if self.is_dragging and (time.time() - self.mouse_down_time > 0.15) and not (win32api.GetAsyncKeyState(win32con.VK_LBUTTON) & 0x8000):
@@ -886,7 +892,8 @@ class SciTwiOverlay:
                                 self.selection_active = False
                                 self.state = "idle"
                         elif self.show_response and not resp_card_rect.collidepoint(mx, my):
-                            self.dismiss_response()
+                            if not getattr(self, "is_processing", False):
+                                self.dismiss_response()
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1 and self.is_dragging:

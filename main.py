@@ -82,6 +82,7 @@ def main():
         def worker():
             overlay = overlay_ref[0]
             if overlay:
+                overlay.is_processing = True
                 overlay.set_state("thinking", "Formulating a reply...")
 
             def on_status_trailer(trailer_text: str):
@@ -107,6 +108,8 @@ def main():
 
             def on_done():
                 if overlay:
+                    overlay.is_processing = False
+                    overlay.response_start_time = time.time()
                     overlay.set_state("music" if is_music else "idle")
 
             # Fallback timer: ensure card displays within 3.5s if cloud TTS has a network delay
