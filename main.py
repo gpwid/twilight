@@ -89,6 +89,7 @@ def main():
                 if overlay:
                     overlay.show_response_card(trailer_text, user_query=user_prompt)
                     overlay.set_state("thinking")
+                audio.speak(trailer_text)
 
             response_text = brain.query(user_prompt, status_callback=on_status_trailer)
             active_m = getattr(brain, "last_used_model", getattr(brain.config, "model", "default"))
@@ -112,8 +113,8 @@ def main():
                     overlay.response_start_time = time.time()
                     overlay.set_state("music" if is_music else "idle")
 
-            # Fallback timer: ensure card displays within 3.5s if cloud TTS has a network delay
-            fallback_timer = threading.Timer(3.5, show_card_sync)
+            # Fallback timer: ensure card displays within 6.5s if cloud TTS has a network delay
+            fallback_timer = threading.Timer(6.5, show_card_sync)
             fallback_timer.daemon = True
             fallback_timer.start()
 

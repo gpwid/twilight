@@ -69,8 +69,8 @@ class FishAudioClient:
         payload = {
             "text": text.strip(),
             "format": "wav",
-            "temperature": 0.85,
-            "top_p": 0.85,
+            "temperature": 0.70,
+            "top_p": 0.70,
             "normalize": True,
         }
         if self.model_id:
