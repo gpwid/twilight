@@ -535,12 +535,21 @@ def run_ghost_cursor_overlay(target_x: int, target_y: int, label: str = "", star
                 if event.type == pygame.QUIT:
                     running = False
                     break
-
-            if elapsed > 1.5:
-                if win32api.GetAsyncKeyState(win32con.VK_LBUTTON) & 0x8000 or win32api.GetAsyncKeyState(win32con.VK_ESCAPE) & 0x8000:
+            
+            if elapsed > 2.0:
+                if win32api.GetAsyncKeyState(win32con.VK_ESCAPE) & 0x8000:
                     running = False
                     break
-                if elapsed > (glide_time + duration):
+                # Only dismiss on mouse click if at least 4s have passed AND the user clicked right on the target!
+                if elapsed > 4.0 and (win32api.GetAsyncKeyState(win32con.VK_LBUTTON) & 0x8000):
+                    try:
+                        mx, my = win32api.GetCursorPos()
+                        if math.hypot(mx - target_x, my - target_y) < 55:
+                            running = False
+                            break
+                    except Exception:
+                        pass
+                if elapsed > (glide_time + min(duration, 20.0)):
                     running = False
                     break
 
@@ -931,13 +940,12 @@ def is_terminal_or_overlay_hwnd(h):
     return False
 
 def close_active_browser_tab(target_x: int = None, target_y: int = None):
-    """Swift visual cursor automation: glides Twilight's cursor to active tab and closes cleanly with Ctrl+W in 0.15s."""
+    """Focus browser and cleanly close the active tab with Ctrl+W without moving cursor to a random tab."""
     attach_desktop()
     if not win32gui or not win32api:
         return False
 
     fg = win32gui.GetForegroundWindow()
-    # Ensure foreground window is actually a browser; if user is in VS Code, Spotify, etc., find the browser
     is_fg_browser = False
     if fg and win32gui.IsWindowVisible(fg):
         try:
@@ -955,17 +963,12 @@ def close_active_browser_tab(target_x: int = None, target_y: int = None):
         try:
             force_foreground_window(fg)
             time.sleep(0.04)
-            r = win32gui.GetWindowRect(fg)
-            w = r[2] - r[0]
 
-            tab_x = target_x if target_x is not None else (r[0] + min(w - 150, max(200, int(w * 0.25))))
-            tab_y = target_y if target_y is not None else (r[1] + 20)
+            if target_x is not None and target_y is not None:
+                glide_hardware_cursor(target_x, target_y, action="none", glide_time=0.15)
+                time.sleep(0.02)
 
-            # Swift glide to tab strip
-            glide_hardware_cursor(tab_x, tab_y, action="none", glide_time=0.15)
-            time.sleep(0.02)
-
-            # Cleanly dispatch Ctrl+W
+            # Cleanly dispatch Ctrl+W to close active tab
             win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
             win32api.keybd_event(ord('W'), 0, 0, 0)
             time.sleep(0.02)
@@ -1027,7 +1030,7 @@ def open_new_browser_tab(url: str = ""):
             else:
                 import urllib.parse
                 target_url = f"https://www.google.com/search?q={urllib.parse.quote(clean)}"
-            navigate_browser_with_cursor(target_url)
+            navigate_browser_with_cursor(target_url, new_tab=False)
         return True
     except Exception as e:
         print(f"[Cursor] open_new_browser_tab error: {e}")
@@ -1623,13 +1626,15 @@ def adjust_brightness_with_cursor(level: int = 50):
         print(f"[Cursor] adjust_brightness_with_cursor error: {e}")
         return False
 
-def navigate_browser_with_cursor(url: str, is_video: bool = False):
-    """Capri-style visual browser navigation: focus browser, glide to address bar, type URL, enter, and engage video."""
+def navigate_browser_with_cursor(url: str, is_video: bool = False, new_tab: bool = True):
+    """Visual browser navigation: focus browser, open a NEW tab (Ctrl+T) so current tab is never overwritten, paste URL, and press Enter."""
     attach_desktop()
     if not win32gui or not win32api:
         return False
 
     browser_hwnd = get_browser_window()
+    was_already_open = bool(browser_hwnd)
+
     if not browser_hwnd:
         chrome_exe = shutil.which("chrome.exe") or os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
         if os.path.exists(chrome_exe):
@@ -1646,18 +1651,27 @@ def navigate_browser_with_cursor(url: str, is_video: bool = False):
     if browser_hwnd:
         try:
             force_foreground_window(browser_hwnd)
-            time.sleep(0.18)
+            time.sleep(0.15)
             r = win32gui.GetWindowRect(browser_hwnd)
             w = r[2] - r[0]
             h = r[3] - r[1]
 
-            # Visual glide to address bar with action="none" to prevent accidental misclick in resized windows
+            # If browser was already open, open a brand-new tab (Ctrl+T) so we never overwrite the user's current tab!
+            if was_already_open and new_tab:
+                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+                win32api.keybd_event(ord('T'), 0, 0, 0)
+                time.sleep(0.02)
+                win32api.keybd_event(ord('T'), 0, win32con.KEYEVENTF_KEYUP, 0)
+                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+                time.sleep(0.18)
+
+            # Visual glide to address bar with action="none"
             addr_x = r[0] + min(int(w * 0.40), 300)
             addr_y = r[1] + min(int(h * 0.10), 62)
-            glide_hardware_cursor(addr_x, addr_y, action="none", glide_time=0.25)
+            glide_hardware_cursor(addr_x, addr_y, action="none", glide_time=0.22)
             time.sleep(0.04)
 
-            # Alt+D is universally supported across Chrome, Edge, Brave, and Firefox to focus omnibox
+            # Alt+D focuses the address bar across Chrome, Edge, Brave, and Firefox
             win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
             win32api.keybd_event(ord('D'), 0, 0, 0)
             time.sleep(0.02)
@@ -1665,7 +1679,7 @@ def navigate_browser_with_cursor(url: str, is_video: bool = False):
             win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
             time.sleep(0.06)
 
-            # Paste URL via clipboard to completely bypass Chrome omnibox history autocompletion
+            # Paste URL via clipboard
             pasted = False
             try:
                 import win32clipboard
@@ -1693,7 +1707,7 @@ def navigate_browser_with_cursor(url: str, is_video: bool = False):
             if is_video:
                 vid_x = r[0] + w // 2
                 vid_y = r[1] + int(h * 0.48)
-                glide_hardware_cursor(vid_x, vid_y, action="click", glide_time=0.38)
+                glide_hardware_cursor(vid_x, vid_y, action="none", glide_time=0.25)
             return True
         except Exception as e:
             print(f"[Cursor] navigate_browser_with_cursor error: {e}")

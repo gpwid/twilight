@@ -173,11 +173,9 @@ def web_search(query: str) -> str:
         user_q = get_current_user_query().lower()
         if any(kw in user_q for kw in ["browser", "chrome", "edge", "show me on screen", "pull up on screen", "on my screen"]):
             try:
-                import cursor_assistant
+                import webbrowser
                 search_url = f"https://www.google.com/search?q={urllib.parse.quote(clean)}"
-                cursor_assistant.navigate_browser_with_cursor(search_url)
-                time.sleep(0.35)
-                cursor_assistant.scroll_page_with_cursor("down", 180)
+                webbrowser.open(search_url, new=2)
             except Exception as be:
                 print(f"[Tools] Browser search navigation note: {be}")
 
@@ -425,11 +423,13 @@ def open_app(app_name: str) -> str:
             return f"Successfully opened {matched_name}."
 
         # 4. Try URI protocol or Windows shell execution directly
-        try:
-            subprocess.Popen(f"start {clean}", shell=True)
-            return f"Launched {clean}."
-        except Exception:
-            pass
+        known_protocols = ("spotify", "discord", "steam", "slack", "zoommtg", "skype", "obsidian")
+        if clean in known_protocols:
+            try:
+                os.startfile(f"{clean}:")
+                return f"Launched {clean}."
+            except Exception:
+                pass
 
         return f"Could not find '{app_name}' installed on this computer."
     except Exception as e:
@@ -819,15 +819,6 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
             except Exception as e:
                 print(f"[Tools] spotify_cli error: {e}")
 
-        # Visual cursor automation fallback when spotify_cli is not present
-        try:
-            import cursor_assistant
-            import threading
-            threading.Thread(target=cursor_assistant.search_and_play_spotify, args=(clean,), daemon=True).start()
-            return f"Playing '{clean}' on Spotify! I've searched for it and clicked play with my cursor."
-        except Exception as ce:
-            print(f"[Tools] cursor_assistant visual spotify error: {ce}")
-
         encoded = urllib.parse.quote(clean or "top hits")
         os.startfile(f"spotify:search:{encoded}")
         return f"Searching and playing '{clean}' on Spotify."
@@ -978,78 +969,99 @@ def play_playlist(name: str = "") -> str:
             details = get_playlist_details(user_uri)
             desc_str = f" (Description: \"{details['description']}\")" if details.get("description") else ""
             tracks_str = f" — Featuring tracks: {', '.join(details['sample_tracks'][:3])}" if details.get("sample_tracks") else ""
-            import cursor_assistant
-            import threading
-            threading.Thread(target=cursor_assistant.play_spotify_playlist_with_cursor, args=(user_name or clean,), daemon=True).start()
             return f"Playing user playlist '{user_name or clean}'{desc_str}{tracks_str} on Spotify!"
 
         clean = re.sub(r'^(?:(?:play|open|put on)\s+)?(?:one of\s+)?(?:my\s+)?playlists?\s*', '', clean, flags=re.IGNORECASE).strip()
-        import cursor_assistant
-        import threading
-        threading.Thread(target=cursor_assistant.play_spotify_playlist_with_cursor, args=(clean,), daemon=True).start()
+        encoded = urllib.parse.quote(clean or "playlist")
+        os.startfile(f"spotify:search:{encoded}")
         if clean:
-            return f"Playing your playlist '{clean}' on Spotify! I've glided to it and pressed play with my cursor."
-        return "Playing one of your playlists from the Spotify sidebar! I've selected it and pressed play with my cursor."
+            return f"Searching and playing your playlist '{clean}' on Spotify!"
+        return "Opened your Spotify playlists to play!"
     except Exception as e:
         print(f"[Tools] play_playlist error: {e}")
         return f"Failed to play playlist: {e}"
 
 def get_top_youtube_video(query: str) -> tuple[str | None, str | None, str | None, str | None]:
-    """Find the top relevant YouTube video ID, title, channel name, and duration for a query using fast web scraping."""
+    """Find the top relevant (or most recent) YouTube video ID, title, channel name, and duration."""
     try:
-        clean = query.strip()
-        encoded = urllib.parse.quote(clean)
-        url = f"https://www.youtube.com/results?search_query={encoded}"
+        raw_clean = query.strip()
+        is_recent = bool(re.search(r'\b(?:recent|latest|newest|new|last)\b', raw_clean, re.IGNORECASE))
+
+        # Strip conversational prefixes like "a recent video from", "latest video by", "video of"
+        clean = re.sub(
+            r'^(?:open\s+up\s+|play\s+|watch\s+|pull\s+up\s+)?(?:a\s+|the\s+)?'
+            r'(?:(?:recent|latest|newest|new|last)\s+)?(?:youtube\s+)?(?:videos?|uploads?|streams?)\s+(?:from|by|of|on)\s+',
+            '', raw_clean, flags=re.IGNORECASE
+        ).strip()
+        clean = re.sub(r'\s+(?:recent|latest|newest|new)\s+(?:youtube\s+)?(?:videos?|uploads?)$', '', clean, flags=re.IGNORECASE).strip()
+        if not clean:
+            clean = raw_clean
+
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9"
         }
-        resp = httpx.get(url, headers=headers, timeout=4.0)
-        if resp.status_code == 200:
-            html = resp.text
-            video_ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+
+        def _extract_first_video(html_text: str, fallback_channel: str = ""):
+            video_ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html_text)
             for vid in video_ids:
-                m_title = re.search(rf'"videoId":"{vid}".*?"title":\{{"runs":\[\{{"text":"([^"]+)"\}}', html)
+                m_title = re.search(rf'"videoId":"{vid}".*?"title":\{{"runs":\[\{{"text":"([^"]+)"\}}', html_text)
                 if not m_title:
-                    m_title = re.search(rf'"videoId":"{vid}".*?"title":\{{"simpleText":"([^"]+)"\}}', html)
+                    m_title = re.search(rf'"videoId":"{vid}".*?"title":\{{"simpleText":"([^"]+)"\}}', html_text)
                 title = m_title.group(1) if m_title else ""
 
-                m_channel = re.search(rf'"videoId":"{vid}".*?"longBylineText":\{{"runs":\[\{{"text":"([^"]+)"\}}', html)
+                m_channel = re.search(rf'"videoId":"{vid}".*?"longBylineText":\{{"runs":\[\{{"text":"([^"]+)"\}}', html_text)
                 if not m_channel:
-                    m_channel = re.search(rf'"videoId":"{vid}".*?"ownerText":\{{"runs":\[\{{"text":"([^"]+)"\}}', html)
-                channel = m_channel.group(1) if m_channel else ""
+                    m_channel = re.search(rf'"videoId":"{vid}".*?"ownerText":\{{"runs":\[\{{"text":"([^"]+)"\}}', html_text)
+                channel = m_channel.group(1) if m_channel else fallback_channel
 
-                m_len = re.search(rf'"videoId":"{vid}".*?"lengthText":\{{.*?"simpleText":"([^"]+)"\}}', html)
+                m_len = re.search(rf'"videoId":"{vid}".*?"lengthText":\{{.*?"simpleText":"([^"]+)"\}}', html_text)
                 duration = m_len.group(1) if m_len else ""
-
                 if title:
                     return vid, title, channel, duration
             if video_ids:
-                return video_ids[0], clean, "", ""
+                return video_ids[0], clean, fallback_channel, ""
+            return None, None, None, None
+
+        encoded = urllib.parse.quote(clean)
+        url = f"https://www.youtube.com/results?search_query={encoded}"
+        resp = httpx.get(url, headers=headers, timeout=4.0, follow_redirects=True)
+
+        if resp.status_code == 200:
+            html_text = resp.text
+            # If user asked for a recent/latest video from a YouTuber, check their @handle/videos page first!
+            if is_recent:
+                m_handle = re.search(r'"canonicalBaseUrl":"(/@[a-zA-Z0-9_.\-]+)"', html_text)
+                if m_handle:
+                    handle_path = m_handle.group(1)
+                    ch_url = f"https://www.youtube.com{handle_path}/videos"
+                    ch_resp = httpx.get(ch_url, headers=headers, timeout=4.0, follow_redirects=True)
+                    if ch_resp.status_code == 200:
+                        vid, title, channel, duration = _extract_first_video(ch_resp.text, fallback_channel=clean.title())
+                        if vid:
+                            return vid, title, channel, duration
+
+            vid, title, channel, duration = _extract_first_video(html_text)
+            if vid:
+                return vid, title, channel, duration
     except Exception as e:
         print(f"[Tools] get_top_youtube_video error: {e}")
     return None, None, None, None
 
 def play_youtube(query: str, auto_play: bool = True) -> str:
-    """Search and play a video or music on YouTube, or open YouTube search.
-    
-    Args:
-        query: Song name, video topic, or search query (e.g. 'post malone tiny desk concert', 'jeff buckley grace').
-        auto_play: If True (default for 'play', 'watch', 'listen to'), resolves the top relevant video and starts playing it directly. If False (e.g. for 'search', 'look up'), opens YouTube search results.
-    """
+    """Search and play a video or music on YouTube, or open YouTube search."""
+    mark_action_tool_executed()
     try:
         raw = query.strip()
-        # If query specifically asks to search/look up without asking to play
-        is_search_only = bool(re.search(r'^(?:search for|search|look up)\b', raw, re.IGNORECASE)) and not bool(re.search(r'\b(?:play|watch|listen)\b', raw, re.IGNORECASE))
+        is_search_only = bool(re.search(r'^(?:search for|search|look up)\b', raw, re.IGNORECASE)) and not bool(re.search(r'\b(?:play|watch|listen|open|video)\b', raw, re.IGNORECASE))
         if is_search_only:
             auto_play = False
 
-        clean = re.sub(r'^(?:play up|play|watch|look up|search for|search|listen to)\s+(?:some\s+)?', '', raw, flags=re.IGNORECASE)
+        clean = re.sub(r'^(?:open\s+up|open|play\s+up|play|watch|look\s+up|search\s+for|search|listen\s+to|pull\s+up)\s+(?:some\s+)?', '', raw, flags=re.IGNORECASE)
         clean = re.sub(r'\s+on youtube$', '', clean, flags=re.IGNORECASE).strip()
         if not clean:
             clean = raw
 
-        # 1. Direct video playback with Capri-style visual cursor navigation
         if auto_play:
             print(f"[Tools] Finding top relevant YouTube video for '{clean}'...")
             vid, title, channel, duration = get_top_youtube_video(clean)
@@ -1060,20 +1072,15 @@ def play_youtube(query: str, auto_play: bool = True) -> str:
                 safe_title = (title or clean).encode('ascii', 'replace').decode('ascii')
                 safe_chan = chan_str.encode('ascii', 'replace').decode('ascii')
                 print(f"[Tools] Playing YouTube video: {watch_url} ({safe_title}{safe_chan})")
-                script_path = os.path.join(os.path.dirname(__file__), "cursor_assistant.py")
-                subprocess.Popen([sys.executable, script_path, "--nav-browser", watch_url, "--is-video"], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                try:
-                    os.startfile(watch_url)
-                except Exception:
-                    pass
-                return f"Playing '{title or clean}'{chan_str}{dur_str} on YouTube (URL: {watch_url})."
+                import webbrowser
+                webbrowser.open(watch_url, new=2)
+                return f"Playing YouTube video '{title or clean}'{chan_str}{dur_str} (URL: {watch_url})."
 
-        # 2. Search results page with Capri-style visual cursor navigation
         encoded = urllib.parse.quote(clean)
         search_url = f"https://www.youtube.com/results?search_query={encoded}"
         print(f"[Tools] Opening YouTube search in browser: {search_url}")
-        script_path = os.path.join(os.path.dirname(__file__), "cursor_assistant.py")
-        subprocess.Popen([sys.executable, script_path, "--nav-browser", search_url], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        import webbrowser
+        webbrowser.open(search_url, new=2)
         return f"Opened YouTube search for '{clean}' in your browser."
     except Exception as e:
         print(f"[Tools] play_youtube error: {e}")
@@ -1153,10 +1160,10 @@ def open_url(url: str) -> str:
             except Exception as wiki_err:
                 print(f"[Tools] Wikipedia API note: {wiki_err}")
 
-        # Open the resolved URL in the user's default browser visually with Twilight's cursor
-        print(f"[Tools] Opening URL in browser with cursor: {final_url}")
-        script_path = os.path.join(os.path.dirname(__file__), "cursor_assistant.py")
-        subprocess.Popen([sys.executable, script_path, "--nav-browser", final_url], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        # Open the resolved URL in the user's default browser instantly
+        print(f"[Tools] Opening URL in default browser: {final_url}")
+        import webbrowser
+        webbrowser.open(final_url, new=2)
 
         # For non-Wikipedia, non-search URLs, do a rich text fetch with BeautifulSoup
         if not is_wiki and not is_search_engine:
@@ -1448,7 +1455,7 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
         except Exception:
             pass
 
-    # 2. Two-Stage Coarse-to-Fine Multimodal Vision Grounding
+# 2. Precision Multimodal Vision Grounding (Handles text buttons, filenames like brain.py, and icon-only controls)
     try:
         from google import genai
         from google.genai import types
@@ -1458,36 +1465,58 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
         if not api_key:
             return None, None, target_description, "Gemini API key is required for visual element localization."
 
+        # Clean conversational noise from target_description while preserving dots in filenames like brain.py
+        clean_target = re.sub(
+            r'\b(?:on\s+this\s+page|on\s+my\s+screen|on\s+screen|in\s+this\s+window|right\s+here|here)\b',
+            '', target_description, flags=re.IGNORECASE
+        ).strip()
+        if not clean_target:
+            clean_target = target_description.strip()
+
+        # Ignore Twilight's own python overlay process as app_name
+        if app_name and any(x in app_name.lower() for x in ("python", "twilight", "companion")):
+            app_name = ""
+
         full_img = capture_screen_image()
         img_w, img_h = full_img.size
 
         buf_full = io.BytesIO()
-        full_img.save(buf_full, format="JPEG", quality=75)
+        full_img.save(buf_full, format="JPEG", quality=80)
         full_bytes = buf_full.getvalue()
 
         client = genai.Client(api_key=api_key)
 
-        # Stage 1: Coarse Region / Panel Detection
-        coarse_prompt = (
-            f"You are a precision GUI locator on a Windows desktop. Locate the general region, toolbar, or panel containing: '{target_description}'"
-            + (f" in '{app_name}'" if app_name else "") + ". "
-            "Return ONLY a JSON object: "
-            '{"found": true, "region": [ymin, xmin, ymax, xmax], "label": "<short name>", "guidance": "<short note on position and shortcut if known>"}. '
-            'Coordinates must be normalized integers 0-1000. If not visible on screen, return {"found": false, "guidance": "why not found"}.'
+        locator_prompt = (
+            f"You are a precision GUI element locator on a Windows desktop screen. "
+            f"Find the exact UI element, button, filename, link, tab, or icon matching: '{clean_target}'"
+            + (f" (in {app_name})" if app_name else "") + ".\n"
+            "IMPORTANT RULES:\n"
+            "1. Look for matching text labels, filenames (e.g. 'brain.py', 'Add a README', 'Add file', 'Code'), OR standard UI icons without text "
+            "(for example: 'community'/'communities' on WhatsApp or Discord is the 3-people group icon on the far-left vertical sidebar; "
+            "'status' is the concentric circles icon; 'channels' is the chat-bubble icon; 'settings' is a gear icon; 'new chat' is a plus/pencil icon).\n"
+            "2. Return the tight 2D bounding box [ymin, xmin, ymax, xmax] (normalized integers 0 to 1000) around the SPECIFIC target element itself.\n"
+            "3. Return ONLY valid JSON in this exact format:\n"
+            '{"found": true, "box_2d": [ymin, xmin, ymax, xmax], "label": "<short name>", "guidance": "<1 sentence describing where it is on screen>"}\n'
+            'If truly not visible anywhere on screen, return {"found": false, "guidance": "reason"}.'
         )
 
-        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemma-4-26b-a4b-it"]
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it", "gemini-3.5-flash"]
 
-        def call_coarse():
+        def call_locator():
             for m in models_to_try:
                 try:
+                    t_cfg = None if "gemma" in m else types.ThinkingConfig(thinking_level="minimal", include_thoughts=False)
                     return client.models.generate_content(
                         model=m,
                         contents=[
                             types.Part.from_bytes(data=full_bytes, mime_type="image/jpeg"),
-                            types.Part.from_text(text=coarse_prompt)
+                            types.Part.from_text(text=locator_prompt)
                         ],
-                        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.0,
+                            thinking_config=t_cfg
+                        )
                     )
                 except Exception:
                     continue
@@ -1496,10 +1525,10 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
         resp1 = None
         try:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(call_coarse)
-                resp1 = future.result(timeout=18.0)
+                future = executor.submit(call_locator)
+                resp1 = future.result(timeout=15.0)
         except Exception as ce:
-            print(f"[Grounding] Stage 1 coarse note ({type(ce).__name__}): {ce}")
+            print(f"[Grounding] Stage 1 locator note ({type(ce).__name__}): {ce}")
 
         if resp1 and resp1.text:
             raw1 = resp1.text.strip()
@@ -1510,22 +1539,24 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
             if isinstance(data1, list) and data1:
                 data1 = data1[0]
 
-            if data1.get("found", True):
-                region = data1.get("region") or data1.get("box_2d")
-                lbl = data1.get("label") or target_description
+            if data1.get("found", False):
+                region = data1.get("box_2d") or data1.get("region")
+                lbl = data1.get("label") or clean_target
                 guide = data1.get("guidance") or ""
 
                 if region and len(region) == 4:
                     box_w = abs(region[3] - region[1])
                     box_h = abs(region[2] - region[0])
-                    t_lower = target_description.lower()
-                    needs_fine_disambiguation = any(k in t_lower for k in ("pen", "pencil", "brush", "star", "polygon"))
-                    if not needs_fine_disambiguation and (box_w < 160 and box_h < 160):
+                    t_lower = clean_target.lower()
+                    needs_fine = any(k in t_lower for k in ("pen tool", "pencil tool")) or (box_w > 220 or box_h > 220)
+
+                    if not needs_fine:
                         mid_px = int(((region[1] + region[3]) / 2.0 / 1000.0) * img_w)
                         mid_py = int(((region[0] + region[2]) / 2.0 / 1000.0) * img_h)
-                        print(f"[Grounding] Fast Stage 1 pinpoint: {lbl} at ({mid_px}, {mid_py})")
+                        print(f"[Grounding] Pinpointed '{lbl}' at ({mid_px}, {mid_py})")
                         return mid_px, mid_py, lbl, guide
 
+                    # Stage 2 crop refinement only when Stage 1 returned a large panel (>220 units)
                     c_ymin = max(0, int((region[0] / 1000.0) * img_h) - 35)
                     c_xmin = max(0, int((region[1] / 1000.0) * img_w) - 35)
                     c_ymax = min(img_h, int((region[2] / 1000.0) * img_h) + 35)
@@ -1536,47 +1567,26 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
                     crop_img.save(buf_crop, format="PNG")
                     crop_bytes = buf_crop.getvalue()
 
-                    disambiguation = ""
-                    t_lower = target_description.lower()
-                    if "pen" in t_lower and "pencil" not in t_lower:
-                        disambiguation = (
-                            "CRITICAL ICON DISTINCTION: You must locate the classic PEN TOOL (hotkey P), "
-                            "which is the metallic FOUNTAIN PEN NIB (pointed nib with center slit). "
-                            "Do NOT choose the PENCIL TOOL (wooden pencil with eraser tip, hotkey N), "
-                            "and do NOT choose the Vector Brush tool (paintbrush). Pick the fountain pen nib! "
-                            "In Affinity Designer, the Pen tool is in the vertical left toolbar, directly above the Pencil tool."
-                        )
-                    elif "pencil" in t_lower:
-                        disambiguation = (
-                            "CRITICAL ICON DISTINCTION: You must locate the PENCIL TOOL (hotkey N), "
-                            "which is the wooden pencil icon with an eraser tip. Do NOT choose the fountain pen nib."
-                        )
-                    elif any(s in t_lower for s in ("shape", "rect", "square", "ellipse", "circle", "polygon")):
-                        disambiguation = "Look for the shape icon (rectangle, circle/ellipse, or polygon)."
-                    elif "text" in t_lower or "type" in t_lower:
-                        disambiguation = "Look for the text tool icon represented by a capital letter 'T'."
-                    elif "close" in t_lower and "tab" in t_lower:
-                        disambiguation = "Look for the small 'x' close button on the tab strip."
-
                     fine_prompt = (
-                        f"In this high-resolution unscaled crop of the toolbar or panel, identify the EXACT pixel center of: '{target_description}'. "
-                        + (f"\n{disambiguation}\n" if disambiguation else "") +
-                        "Look carefully at the specific tool icon, button symbol, or shape. "
-                        "Return ONLY JSON: "
-                        '{"found": true, "center_x": <int 0-1000>, "center_y": <int 0-1000>, "label": "<short name>", "guidance": "<note>"}. '
-                        'Coordinates are normalized 0-1000 relative to this cropped image.'
+                        f"In this cropped area, find the exact center of '{clean_target}'. "
+                        'Return ONLY JSON: {"found": true, "center_x": <int 0-1000>, "center_y": <int 0-1000>, "label": "<short name>", "guidance": "<note>"}.'
                     )
 
                     def call_fine():
                         for m in models_to_try:
                             try:
+                                t_cfg = None if "gemma" in m else types.ThinkingConfig(thinking_level="minimal", include_thoughts=False)
                                 return client.models.generate_content(
                                     model=m,
                                     contents=[
                                         types.Part.from_bytes(data=crop_bytes, mime_type="image/png"),
                                         types.Part.from_text(text=fine_prompt)
                                     ],
-                                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
+                                    config=types.GenerateContentConfig(
+                                        response_mime_type="application/json",
+                                        temperature=0.0,
+                                        thinking_config=t_cfg
+                                    )
                                 )
                             except Exception:
                                 continue
@@ -1586,55 +1596,27 @@ def ground_screen_element(target_description: str, app_name: str = "") -> tuple[
                     try:
                         with ThreadPoolExecutor(max_workers=1) as executor:
                             future = executor.submit(call_fine)
-                            resp2 = future.result(timeout=18.0)
-                    except Exception as fe:
-                        print(f"[Grounding] Stage 2 fine note ({type(fe).__name__}): {fe}")
+                            resp2 = future.result(timeout=12.0)
+                    except Exception:
+                        pass
 
                     if resp2 and resp2.text:
-                        raw2 = resp2.text.strip()
-                        if raw2.startswith("```"):
-                            raw2 = re.sub(r'^```(?:json)?\s*', '', raw2)
-                            raw2 = re.sub(r'\s*```$', '', raw2)
+                        raw2 = re.sub(r'^```(?:json)?\s*|\s*```$', '', resp2.text.strip())
                         data2 = json.loads(raw2)
                         if isinstance(data2, list) and data2:
                             data2 = data2[0]
-
-                        if data2.get("found", True):
-                            fx = data2.get("center_x") if data2.get("center_x") is not None else data2.get("x")
-                            fy = data2.get("center_y") if data2.get("center_y") is not None else data2.get("y")
-                            if fx is not None and fy is not None:
-                                crop_w = c_xmax - c_xmin
-                                crop_h = c_ymax - c_ymin
-                                final_px = c_xmin + int((float(fx) / 1000.0) * crop_w)
-                                final_py = c_ymin + int((float(fy) / 1000.0) * crop_h)
-                                final_lbl = data2.get("label") or lbl
-                                final_guide = data2.get("guidance") or guide or f"Located at ({final_px}, {final_py})."
-                                print(f"[Grounding] Precision pinpoint: {final_lbl} at ({final_px}, {final_py})")
-                                return final_px, final_py, final_lbl, final_guide
+                        fx = data2.get("center_x") if data2.get("center_x") is not None else data2.get("x")
+                        fy = data2.get("center_y") if data2.get("center_y") is not None else data2.get("y")
+                        if fx is not None and fy is not None:
+                            final_px = c_xmin + int((float(fx) / 1000.0) * (c_xmax - c_xmin))
+                            final_py = c_ymin + int((float(fy) / 1000.0) * (c_ymax - c_ymin))
+                            return final_px, final_py, data2.get("label") or lbl, data2.get("guidance") or guide
 
                     mid_px = (c_xmin + c_xmax) // 2
                     mid_py = (c_ymin + c_ymax) // 2
                     return mid_px, mid_py, lbl, guide
     except Exception as e:
-        print(f"[Grounding] Two-stage vision error: {e}")
-
-    # Fallback for Figma UI3 dock tools if in Figma
-    if "figma" in (app_name or "").lower():
-        f_rect = win32gui.GetWindowRect(fg_hwnd) if fg_hwnd else (0, 0, screen_w, screen_h)
-        fw = max(400, f_rect[2] - f_rect[0])
-        bottom_y = f_rect[3] - 44
-        if "pen" in target_lower or "pencil" in target_lower:
-            return f_rect[0] + int(0.447 * fw), bottom_y, "Pen Tool (P)", "Pen tool on Figma UI3 bottom dock."
-        if any(s in target_lower for s in ("shape", "rect", "square", "ellipse", "circle", "polygon", "star")):
-            return f_rect[0] + int(0.409 * fw), bottom_y, "Shape Tools (R/O)", "Shape tool on Figma UI3 bottom dock."
-        if "text" in target_lower or "type" in target_lower:
-            return f_rect[0] + int(0.485 * fw), bottom_y, "Text Tool (T)", "Text tool on Figma UI3 bottom dock."
-        if any(m in target_lower for m in ("move", "select", "pointer", "cursor", "v tool")):
-            return f_rect[0] + int(0.370 * fw), bottom_y, "Move Tool (V)", "Selection tool on Figma UI3 bottom dock."
-        if "frame" in target_lower or "slice" in target_lower:
-            return f_rect[0] + int(0.428 * fw), bottom_y, "Frame Tool (F)", "Frame tool on Figma UI3 bottom dock."
-        if "hand" in target_lower:
-            return f_rect[0] + int(0.505 * fw), bottom_y, "Hand Tool (H)", "Hand tool on Figma UI3 bottom dock."
+        print(f"[Grounding] Vision grounding error: {e}")
 
     return None, None, target_description, "Element not visible or located on screen."
 
@@ -1647,7 +1629,7 @@ def locate_and_point_tool(tool_name: str, app_name: str = "") -> str:
             script_path = os.path.join(os.path.dirname(__file__), "cursor_assistant.py")
             cmd = [sys.executable, script_path, "--ghost", "--x", str(x), "--y", str(y), "--label", label, "--duration", "60.0"]
             subprocess.Popen(cmd, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            return f"I found the {label}! {guidance} I've glided my cursor right over to it on your screen with a starlight ring. It will stay there for a minute so you can see it!"
+            return f"I found the {label}! {guidance} I've placed a starlight ring right over it on your screen so you can easily spot it!"
         if app_name:
             return f"I looked for the {tool_name}, but couldn't find {app_name} open on your screen right now! Please open {app_name} first so I can point it out for you."
         return f"I looked for the {tool_name}, but couldn't spot it on your current screen. {guidance}"
@@ -1655,21 +1637,8 @@ def locate_and_point_tool(tool_name: str, app_name: str = "") -> str:
         return f"Error locating {tool_name}: {e}"
 
 def click_and_interact(target_name: str, action: str = "click") -> str:
-    """Move Twilight's custom hardware cursor to click, double-click, or interact with a window, tab, button, or control on screen."""
-    mark_action_tool_executed()
-    try:
-        # Universal Tab Close handler for active window (Chrome, Affinity, Figma, VS Code, etc.)
-        if "tab" in target_name.lower():
-            return close_tab()
-
-        x, y, label, guidance = ground_screen_element(target_name)
-        if x is not None and y is not None:
-            import cursor_assistant
-            cursor_assistant.glide_hardware_cursor(x, y, action=action, glide_time=0.35)
-            return f"Done! I've moved my cursor and {action}ed {label} for you."
-        return f"I couldn't locate {target_name} on your screen to click on it."
-    except Exception as e:
-        return f"Error interacting with {target_name}: {e}"
+    """Deprecated: Physical mouse hijacking is retired. Use locate_and_point_tool to highlight UI elements visually with a starlight ring."""
+    return f"Physical mouse clicking has been retired in favor of native OS shortcuts and visual guidance. If you want to see where '{target_name}' is, ask me 'Where is {target_name}?' and I'll point it out with a starlight ring!"
 
 def close_tab(app_name: str = "") -> str:
     """Close the active tab in a browser or tabbed application (Chrome, Edge, Brave, Firefox, Figma, Affinity, VS Code).
@@ -1681,11 +1650,11 @@ def close_tab(app_name: str = "") -> str:
     try:
         if app_name:
             focus_app_window(app_name)
-        time.sleep(0.08)
+        time.sleep(0.04)
         import cursor_assistant
         cursor_assistant.close_active_browser_tab()
         target_str = f" in {app_name}" if app_name else ""
-        return f"Done! I've glided to your active tab{target_str} and closed it for you."
+        return f"Done! Closed that active tab{target_str} for you."
     except Exception as e:
         return f"Error closing tab: {e}"
 
@@ -1693,10 +1662,18 @@ def open_new_tab(url: str = "") -> str:
     """Open a brand new tab in the active browser (Chrome, Edge, Brave, Firefox) and optionally navigate to a URL or search query."""
     mark_action_tool_executed()
     try:
+        clean = (url or "").strip()
+        if clean:
+            import webbrowser
+            if not clean.startswith("http://") and not clean.startswith("https://"):
+                if "." in clean and not " " in clean:
+                    clean = "https://" + clean
+                else:
+                    clean = f"https://www.google.com/search?q={urllib.parse.quote(clean)}"
+            webbrowser.open(clean, new=2)
+            return f"Opened a new browser tab and navigated to '{clean}'."
         import cursor_assistant
-        cursor_assistant.open_new_browser_tab(url)
-        if url:
-            return f"Opened a new browser tab and navigated to '{url}'."
+        cursor_assistant.open_new_browser_tab("")
         return "Opened a brand new tab for you in your browser."
     except Exception as e:
         return f"Error opening new tab: {e}"
@@ -1724,22 +1701,19 @@ def browser_navigate_history(direction: str = "back") -> str:
         return f"Error navigating browser history: {e}"
 
 def open_program(program_name: str) -> str:
-    """Search for and launch a program on Windows using Twilight's custom cursor via the Start menu."""
-    mark_action_tool_executed()
-    try:
-        import cursor_assistant
-        cursor_assistant.open_program_with_cursor(program_name)
-        return f"I've searched for and launched '{program_name}' with my cursor!"
-    except Exception as e:
-        return f"Error opening program: {e}"
+    """Search for and launch an application or program on Windows."""
+    return open_app(program_name)
 
 def close_window() -> str:
-    """Close the currently active window by gliding Twilight's cursor to the top-right X button."""
+    """Close the currently active window cleanly."""
     mark_action_tool_executed()
     try:
-        import cursor_assistant
-        cursor_assistant.close_window_with_cursor()
-        return "Closed the active window for you!"
+        if win32gui:
+            fg = win32gui.GetForegroundWindow()
+            if fg:
+                win32gui.PostMessage(fg, win32con.WM_CLOSE, 0, 0)
+                return "Closed the active window for you!"
+        return "No active window found to close."
     except Exception as e:
         return f"Error closing window: {e}"
 

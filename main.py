@@ -98,7 +98,7 @@ def main():
             print(f"[Twilight ({active_m})]: {response_text}")
 
             lower_resp = response_text.lower()
-            is_music = any(w in lower_resp for w in ("spotify", "playlist", "track", "album", "song", "youtube"))
+            is_music = any(w in lower_resp for w in ("spotify", "playlist", "track", "album", "song"))
 
             # Stop any lingering status trailer speech so the main response callbacks never get stuck
             audio.stop()

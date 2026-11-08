@@ -506,18 +506,15 @@ class SciTwiOverlay:
         except Exception:
             pass
 
-    def _is_spotify_or_browser_playing_audio(self) -> bool:
-        """Detect in <1ms if music/media is actively playing in Spotify or a browser/media player."""
-        # Don't mistake Twilight's own TTS voice for music playback
+    def _detect_media_playback_kind(self) -> str:
+        """Return 'music' if music is playing, 'video' if a non-music video/stream is playing, or '' if silent."""
         if getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn():
-            return self.state == "music"
+            return "music" if self.state == "music" else ""
 
-        # 1. Fast check: When Spotify Desktop is actively playing a track, its window title is "Artist - Track"
-        # When Spotify is paused, its window title reverts to "Spotify Free" / "Spotify Premium" / "Spotify"
-        media_window_open = False
+        media_kind_candidate = ""
         if win32gui:
             def _enum_media(hwnd, _):
-                nonlocal media_window_open
+                nonlocal media_kind_candidate
                 try:
                     if not win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd):
                         return True
@@ -527,14 +524,26 @@ class SciTwiOverlay:
                         return True
                     t_low = title.lower()
                     if cls == "Chrome_WidgetWin_1":
-                        # Active Spotify track title always has " - " and doesn't start with "spotify"
+                        # 1. Active Spotify Desktop track is ALWAYS music
                         if " - " in title and not t_low.startswith("spotify") and not any(
-                            b in t_low for b in ("google chrome", "microsoft edge", "brave", "visual studio", "discord")
+                            b in t_low for b in ("google chrome", "microsoft edge", "brave", "visual studio", "discord", "youtube")
                         ):
-                            media_window_open = "SPOTIFY_PLAYING"
+                            media_kind_candidate = "SPOTIFY_PLAYING"
                             return False
-                        if any(k in t_low for k in ("youtube", "soundcloud", "spotify", "music", "twitch", "netflix", "vlc")):
-                            media_window_open = True
+                        # 2. Dedicated music web players
+                        if any(k in t_low for k in ("youtube music", "soundcloud", "spotify", "apple music", "bandcamp")):
+                            media_kind_candidate = "music"
+                        # 3. YouTube / Twitch / Netflix / VLC: check if title looks like a song or a normal video
+                        elif any(k in t_low for k in ("youtube", "twitch", "netflix", "vlc", "stremio")):
+                            music_title_hints = (
+                                "official video", "official music video", "official audio", "lyric", "lyrics",
+                                "audio)", "(audio", "mv)", "[mv]", "feat.", "ft.", "remix", "cover",
+                                "soundtrack", "ost", "lofi", "lo-fi", "playlist", "full album", "tiny desk"
+                            )
+                            if any(mh in t_low for mh in music_title_hints):
+                                media_kind_candidate = "music"
+                            elif not media_kind_candidate:
+                                media_kind_candidate = "video"
                 except Exception:
                     pass
                 return True
@@ -543,11 +552,11 @@ class SciTwiOverlay:
             except Exception:
                 pass
 
-        if media_window_open == "SPOTIFY_PLAYING":
-            return True
+        if media_kind_candidate == "SPOTIFY_PLAYING":
+            return "music"
 
-        # 2. Check Windows Core Audio Peak Meter for browser/system media playback (YouTube, SoundCloud, VLC, etc.)
-        if media_window_open:
+        # Check Windows Core Audio Peak Meter to verify audio is actually playing (not paused)
+        if media_kind_candidate in ("music", "video"):
             try:
                 if not hasattr(self, "_audio_meter"):
                     import comtypes.client
@@ -590,33 +599,34 @@ class SciTwiOverlay:
                     peak = float(self._audio_meter.GetPeakValue())
                     if peak > 0.003:
                         self._last_audio_peak_time = time.time()
-                        return True
-                    # Small 2.0s grace buffer for quiet between-track gaps
+                        return media_kind_candidate
                     if time.time() - getattr(self, "_last_audio_peak_time", 0.0) < 2.0:
-                        return True
+                        return media_kind_candidate
             except Exception:
                 self._audio_meter = None
 
-        return False
+        return ""
 
     def _get_ambient_context(self) -> tuple[str, str, str]:
-        """Determine (state, emotion, status_msg) dynamically from live music, active window, and user AFK time."""
-        # 1. If music/audio is playing on Spotify or browser, stay in music mode!
-        if self._is_spotify_or_browser_playing_audio():
+        """Determine (state, emotion, status_msg) dynamically from live music, video, active window, and user AFK time."""
+        media_kind = self._detect_media_playback_kind()
+        if media_kind == "music":
             return "music", "music", "Playing music"
+        elif media_kind == "video":
+            return "idle", "analyzing", "Watching with you"
 
-        # 2. Check user AFK time via Win32 GetLastInputInfo
+        # Check user AFK time via Win32 GetLastInputInfo
         try:
             idle_ms = (win32api.GetTickCount() - win32api.GetLastInputInfo()) & 0xFFFFFFFF
             idle_secs = idle_ms / 1000.0
-            if idle_secs >= 480.0:  # 8+ mins AFK -> sleeping
+            if idle_secs >= 480.0:
                 return "idle", "sleep", "Sleeping..."
-            elif idle_secs >= 240.0:  # 4+ mins AFK -> tired
+            elif idle_secs >= 240.0:
                 return "idle", "tired", "Getting sleepy..."
         except Exception:
             pass
 
-        # 3. Inspect active foreground window to match what the user is doing
+        # Inspect active foreground window to match what the user is doing
         try:
             fg_hwnd = win32gui.GetForegroundWindow()
             if fg_hwnd and fg_hwnd != self.hwnd and win32gui.IsWindowVisible(fg_hwnd):
@@ -645,13 +655,12 @@ class SciTwiOverlay:
         self.set_state(st, status_msg=msg, emotion=emo)
 
     def _update_dynamic_study_state(self, dt: float):
-        """Poll live music, active app, and AFK state every 1.0s when not actively in input/thinking/speaking."""
+        """Poll live music, video, active app, and AFK state every 1.0s when not actively in input/thinking/speaking."""
         now = time.time()
         if now - getattr(self, "_last_ambient_poll", 0.0) < 1.0:
             return
         self._last_ambient_poll = now
 
-        # Do not override while user is typing, waiting on LLM, or reading an active speech bubble
         if self.show_input or self.state == "thinking" or self.show_response:
             return
         if getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn():
@@ -664,7 +673,7 @@ class SciTwiOverlay:
 
     def set_state(self, state: str, status_msg: str = "", emotion: str = ""):
         """Update companion state, status message, and facial expression."""
-        if state != self.state or (emotion and emotion != self.current_emotion):
+        if state != getattr(self, "state", "") or (emotion and emotion != getattr(self, "current_emotion", "")):
             self.state_change_time = time.time()
 
         self.state = state
@@ -718,9 +727,9 @@ class SciTwiOverlay:
             lower = text.lower()
             if any(w in lower for w in ("blush", "sunset", "sciset", "tease", "stupid boys", "crush", "flustered")):
                 emotion = "flustered"
-            elif any(w in lower for w in ("closed", "closing", "terminated", "killed", "process", "code", "physics", "calculate")):
+            elif any(w in lower for w in ("closed", "closing", "terminated", "killed", "process", "code", "physics", "calculate", "youtube", "video")):
                 emotion = "analyzing"
-            elif any(w in lower for w in ("spotify", "playlist", "track", "album", "song", "youtube")):
+            elif any(w in lower for w in ("spotify", "playlist", "track", "album", "song")):
                 emotion = "music"
             elif any(w in lower for w in ("error", "sorry", "whoops", "failed", "couldn't")):
                 emotion = "sad"

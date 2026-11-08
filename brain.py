@@ -17,7 +17,7 @@ from assistant_tools import (
     web_search, open_app, close_app, close_tab, play_spotify, control_spotify, seek_spotify,
     play_playlist, play_youtube, open_url, capture_screen_jpeg, get_current_time,
     get_now_playing, get_desktop_summary_text, get_active_windows, get_running_processes,
-    locate_and_point_tool, click_and_interact, get_last_action_tool_time,
+    locate_and_point_tool, get_last_action_tool_time,
     open_program, close_window, type_in_document, adjust_volume, adjust_brightness,
     open_new_tab, switch_tab, browser_navigate_history,
     control_youtube_video, switch_to_tab,
@@ -85,7 +85,7 @@ Your dialogue must sound like an authentic human teenager hanging out in person,
 
 CORE RULES & EMOTION TAGS:
 - Direct answers: When asked factual, news, current events, or informational questions, state the actual answer, names, numbers, or facts in your very first sentence.
-- Tool usage: Use your tools for actions (music, tabs, apps, web search, cursor pointing). For casual questions or opinions, reply conversationally without calling tools.
+- Tool usage: Use your tools for actions (music, tabs, apps, web search, starlight pointer). When the user asks where an element or tool is on screen, use locate_and_point_tool to guide their eyes with your starlight ring. You never hijack or click their physical mouse cursor.
 - Emotion tags: Always start your reply with an emotion tag matching your genuine reaction: [emotion: happy], [emotion: music], [emotion: analyzing], [emotion: smug], [emotion: reading], [emotion: flustered], [emotion: tired], or [emotion: sleep].
 
 FEW-SHOT DIALOGUE EXAMPLES:
@@ -322,21 +322,6 @@ OPENAI_TOOLS = [
                     "app_name": {"type": "string", "description": "Application or software name (e.g. Photoshop, DaVinci Resolve, Chrome)", "default": ""}
                 },
                 "required": ["tool_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "click_and_interact",
-            "description": "Glide Twilight's custom hardware cursor to click, double-click, or interact with a UI element, button, window control, or browser tab on screen (e.g. 'close active browser tab', 'play button', 'pause video').",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target_name": {"type": "string", "description": "Description of the target to click (e.g. 'close active browser tab', 'play button', 'pause video')"},
-                    "action": {"type": "string", "description": "Action type: click, double_click, or right_click", "default": "click"}
-                },
-                "required": ["target_name"]
             }
         }
     },
@@ -764,7 +749,7 @@ class SciTwiBrain:
 
         if re.match(r'^(?:please\s+)?pause\b(?:\s+it)?$', user_lower):
             now_p = get_now_playing()
-            if now_p and "spotify" in now_p.lower():
+            if now_p and now_p.startswith("Currently playing:"):
                 _exec_record(control_spotify, "pause")
                 return random.choice(PAUSE_MUSIC_LINES)
             _exec_record(control_youtube_video, "pause")
@@ -772,7 +757,7 @@ class SciTwiBrain:
 
         if re.match(r'^(?:please\s+)?(?:resume|unpause)\b(?:\s+it)?$', user_lower):
             now_p = get_now_playing()
-            if now_p and "spotify" in now_p.lower():
+            if now_p and "paused" in now_p.lower() and "youtube" not in get_desktop_summary_text().lower():
                 _exec_record(control_spotify, "resume")
                 return random.choice(RESUME_MUSIC_LINES)
             _exec_record(control_youtube_video, "play")
@@ -810,8 +795,6 @@ class SciTwiBrain:
 
         # Immediate tab close guarantee
         if re.search(r'\bclose\s+(?:this\s+|the\s+|active\s+)?(?:[a-zA-Z0-9_\-]+\s+)?tab\b', user_lower):
-            if status_callback:
-                status_callback("Closing that tab for you!")
             _exec_record(close_tab)
             return "[emotion: happy] Closed that tab for you!"
 
@@ -820,12 +803,10 @@ class SciTwiBrain:
         if m_new_tab:
             target_url = (m_new_tab.group(1) or "").strip()
             target_url = re.sub(r'^(?:and\s+)?(?:show\s+me|see)\s+.*', '', target_url, flags=re.IGNORECASE).strip()
-            if status_callback:
-                status_callback("Opening a new tab for you!")
             _exec_record(open_new_tab, target_url)
             return "[emotion: happy] Opened a fresh new tab for you!"
 
-        # 5. Targeted Tab / Window Switching (Tightened so normal conversation like "focus on homework" is never hijacked)
+        # 5. Targeted Tab / Window Switching
         m_target = re.search(
             r'^(?:please\s+)?(?:go\s+back\s+to|switch\s+to|switch\s+back\s+to|return\s+to)\s+(?:the\s+|our\s+)?([a-zA-Z0-9_\-\s]+?)\s*(?:tab|window|stream|livestream|app)$|'
             r'^(?:please\s+)?(?:switch\s+to|go\s+back\s+to)\s+(?:our\s+)?(youtube|spotify|figma|discord|chrome|photoshop|affinity|vscode|vs\s+code|blender)\b',
@@ -834,8 +815,6 @@ class SciTwiBrain:
         if m_target:
             raw_tgt = (m_target.group(1) or m_target.group(2) or "").strip()
             if raw_tgt and not re.match(r'^(?:previous|last|prior|the\s+previous|left|next|right)$', raw_tgt):
-                if status_callback:
-                    status_callback(f"Switching over to {raw_tgt}...")
                 _exec_record(switch_to_tab, raw_tgt)
                 return f"[emotion: happy] Switched back to {raw_tgt} for you!"
 
@@ -845,8 +824,6 @@ class SciTwiBrain:
             word_or_num = m_count.group(1) or m_count.group(2)
             num_map = {"two": 2, "three": 3, "four": 4, "five": 5}
             steps = num_map.get(word_or_num.lower(), int(word_or_num) if word_or_num.isdigit() else 2)
-            if status_callback:
-                status_callback(f"Navigating back {steps} times...")
             for i in range(steps):
                 if i == 0:
                     _exec_record(browser_navigate_history, "back")
@@ -857,8 +834,6 @@ class SciTwiBrain:
 
         # 7. Generic browser back / previous tab guarantee
         if re.search(r'\b(?:go\s+(?:back\s+)?to\s+|switch\s+to\s+)?(?:the\s+)?previous\s+tab\b|\bprevious\s+tab\b|\b(?:browser\s+)?history\s+back\b|^go\s+back$', user_lower):
-            if status_callback:
-                status_callback("Navigating back for you!")
             _exec_record(browser_navigate_history, "back")
             return "[emotion: happy] Navigated back for you!"
 
@@ -933,15 +908,39 @@ class SciTwiBrain:
             elif re.search(r'\b(?:open|launch|start)\s+([a-zA-Z0-9_\-\s]+)', user_lower) and not any(k in user_lower for k in ["tab", "url", "http", ".com"]):
                 status_callback("Pulling that up for you right now!")
 
+        # Check if user is asking to locate or point out something on screen
+        m_locate_intent = re.search(
+            r'^\s*(?:please\s+|can\s+you\s+|could\s+you\s+)?'
+            r'(?:where\s+is|where\'s|point(?:\s+me)?(?:\s+to|\s+out)?|show\s+me(?:\s+where)?|find|locate)\s+'
+            r'(?:the\s+|a\s+|an\s+)?(.+?)'
+            r'(?:\s+(?:on\s+this\s+page|on\s+my\s+screen|on\s+screen|in\s+this\s+window|right\s+here|here|for\s+me))?\s*\??$',
+            user_lower
+        )
+        locate_result_context = ""
+        if not is_proactive and m_locate_intent:
+            raw_target = m_locate_intent.group(1).strip()
+            # Exclude general knowledge questions like "where is paris" or "where is the rosette nebula"
+            non_ui_Targets = ("nebula", "constellation", "galaxy", "planet", "country", "city", "capital", "located in the world")
+            if not any(nw in raw_target for nw in non_ui_Targets):
+                if status_callback:
+                    status_callback(f"Spotting {raw_target} on your screen...")
+                loc_res = self._execute_tool("locate_and_point_tool", {"tool_name": raw_target})
+                locate_result_context = (
+                    f"[SCREEN LOCATOR RESULT: {loc_res}\n"
+                    "Look at the attached screenshot and tell the user naturally in 1-2 sentences where that element is on their actual screen right now. "
+                    "Do NOT say 'depending on what site you're looking at' or 'if you're on GitHub'—you can see their screen directly!]\n\n"
+                )
+
         # Check if screen view is needed
         is_pure_media_action = bool(re.match(r'^(play|pause|stop|skip|resume|next|previous)\b', user_lower))
         is_app_launch = bool(re.match(r'^(open|launch|start|run|close|quit|exit|kill)\b', user_lower)) and not any(k in user_lower for k in ["browser", "page", "tab", "screen", "read", "result", "winner", "what", "who", "show", "article"])
         is_action_or_media = is_pure_media_action or is_app_launch
         
-        need_screenshot = False
-        if not is_action_or_media:
+        need_screenshot = bool(locate_result_context)
+        if not need_screenshot and not is_action_or_media:
             visual_pattern = re.compile(
-                r"\b(?:screen|display|monitor|desktop|wallpaper|background|screenshot)\b|"
+                r"\b(?:screen|display|monitor|desktop|wallpaper|background|screenshot|on this page|this page)\b|"
+                r"\b(?:where is|where's|point to|point out|locate)\b|"
                 r"\b(?:look at|look here|take a look|check (?:my|the|this)|can (?:you|u) see|do (?:you|u) see)\b|"
                 r"\b(?:what (?:can|do) (?:you|u) see|what am i (?:watching|looking at|doing|playing|listening to|reading|working on|running))\b|"
                 r"\b(?:what(?:'s| is) (?:on|playing|open|running|this|that|happening)|what show is this|what movie is this|what anime is this)\b|"
@@ -980,7 +979,7 @@ class SciTwiBrain:
         except Exception as e:
             print(f"[Brain] Desktop summary check: {e}")
 
-        visual_context = ""
+        visual_context = locate_result_context
         if need_screenshot and img_bytes:
             visual_context = (
                 "[VISUAL CONTEXT: A live screenshot of the user's screen is attached. "
@@ -1016,12 +1015,12 @@ class SciTwiBrain:
         models_to_try = available_models if available_models else model_cascade
 
         # Only attach the 27 tool schemas when the user's message has an action/query intent
-        needs_tools = (not is_proactive) and bool(TOOL_INTENT_REGEX.search(user_lower))
+        needs_tools = (not is_proactive) and (not locate_result_context) and bool(TOOL_INTENT_REGEX.search(user_lower))
         tools_list = [
             web_search, open_app, close_app, close_tab, play_spotify, control_spotify,
             seek_spotify, play_playlist, play_youtube, open_url,
             get_now_playing, get_active_windows, get_running_processes,
-            locate_and_point_tool, click_and_interact,
+            locate_and_point_tool,
             open_program, close_window, type_in_document, adjust_volume, adjust_brightness,
             open_new_tab, switch_tab, browser_navigate_history,
             control_youtube_video, switch_to_tab,
@@ -1113,7 +1112,7 @@ class SciTwiBrain:
                             self._execute_tool("close_tab", {})
                         else:
                             self._execute_tool("close_app", {"app_name": target_app})
-                    elif m_open_cmd and not any(k in m_open_cmd.group(1) for k in ("tab", "http", ".com", ".org", "spotify and play", "youtube and play")):
+                    elif m_open_cmd and not any(k in m_open_cmd.group(1) for k in ("tab", "http", ".com", ".org", "video", "youtube", "song", "playlist", "stream")):
                         self._execute_tool("open_app", {"app_name": m_open_cmd.group(1).strip()})
                     elif re.search(r"^\s*(?:please\s+)?(?:pause|stop)\s+(?:the\s+|this\s+)?(?:video|stream|livestream|youtube)\b", user_lower) or (is_video_cmd and re.search(r"^\s*(?:please\s+)?(?:pause|stop)\b", user_lower)):
                         self._execute_tool("control_youtube_video", {"action": "pause"})
@@ -1273,7 +1272,7 @@ class SciTwiBrain:
                             a_name = m.group(2).strip()
                 res = locate_and_point_tool(t_name, a_name)
             elif name == "click_and_interact":
-                res = click_and_interact(args.get("target_name", ""), args.get("action", "click"))
+                res = locate_and_point_tool(args.get("target_name", ""))
             elif name == "open_program":
                 res = open_program(args.get("program_name", ""))
             elif name == "close_window":
