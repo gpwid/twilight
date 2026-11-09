@@ -998,9 +998,26 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
             return play_playlist("")
 
         try:
-            # 1. Check if clean matches top album or top artist on Spotify
             is_album_in_query = bool(re.search(r'\balbums?\b|\btrack\s+from\b|\bsong\s+from\b', query, re.IGNORECASE))
 
+            # Fast Path for Songs: If user specified a track or "by <artist>", search track directly first (<300ms)
+            if not is_album_in_query and not is_random:
+                res_fast = subprocess.run([cli, "search", clean, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5, creationflags=no_win)
+                matches_fast = re.findall(r'(.*?)\s+(spotify:track:[a-zA-Z0-9]+)', res_fast.stdout)
+                if matches_fast:
+                    picked_title, target_uri = matches_fast[0]
+                    picked_title = picked_title.strip()
+                    print(f"[Tools] Playing Spotify URI '{target_uri}' ({picked_title})...")
+                    subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+                    subprocess.run([cli, "navigate", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
+                    meta = get_track_metadata(target_uri)
+                    if meta:
+                        t_name, t_art, t_alb, t_year = meta
+                        alb_str = f" (Album: '{t_alb}' ({t_year}))" if t_alb else ""
+                        return f"Playing '{t_name}' by {t_art}{alb_str} on Spotify."
+                    return f"Playing '{picked_title}' on Spotify!"
+
+            # 1. Check if clean matches top album or top artist on Spotify
             top_art = None
             res_art = subprocess.run([cli, "search", clean, "--type", "artist", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5, creationflags=no_win)
             if res_art.returncode == 0 and res_art.stdout.strip():

@@ -245,7 +245,7 @@ class VoiceInputManager:
             raise RuntimeError(f"All STT providers failed: {e}")
 
     def _transcribe_groq(self, wav_bytes: bytes) -> str:
-        """Execute ultra-fast transcription via Groq Cloud Whisper API (~200ms latency)."""
+        """Execute ultra-fast transcription via Groq Cloud Whisper API (~200ms latency) with network retry."""
         key = getattr(self.config, "groq_api_key", "") or os.environ.get("GROQ_API_KEY", "")
         if not key:
             raise ValueError("Groq API Key is not configured.")
@@ -263,12 +263,20 @@ class VoiceInputManager:
             "prompt": "Twilight, Sci-Twi, Spotify, Radiohead, Clairo, play, pause, search, tab, browser, volume"
         }
 
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(url, headers=headers, data=data, files=files)
-            if resp.status_code != 200:
-                raise RuntimeError(f"Groq API error ({resp.status_code}): {resp.text[:120]}")
-            result = resp.json()
-            return result.get("text", "").strip()
+        last_err = None
+        for attempt in range(2):
+            try:
+                with httpx.Client(timeout=8.0) as client:
+                    resp = client.post(url, headers=headers, data=data, files=files)
+                    if resp.status_code != 200:
+                        raise RuntimeError(f"Groq API error ({resp.status_code}): {resp.text[:120]}")
+                    result = resp.json()
+                    return result.get("text", "").strip()
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError, OSError) as e:
+                last_err = e
+                time.sleep(0.35)
+
+        raise RuntimeError(f"Groq Whisper network error after retry: {last_err}")
 
     def _transcribe_gemini(self, wav_bytes: bytes) -> str:
         """Execute multimodal audio transcription via Google Gemini 3.5 Flash-Lite."""

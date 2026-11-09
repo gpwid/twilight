@@ -722,8 +722,9 @@ class SciTwiOverlay:
         if query:
             self.response_query = query
         if state == "thinking":
-            self.show_response = False
-            self.speech_scroll_y = 0
+            if not getattr(self, "is_trailer", False):
+                self.show_response = False
+                self.speech_scroll_y = 0
 
         if state != getattr(self, "state", "") or (emotion and emotion != getattr(self, "current_emotion", "")):
             self.state_change_time = time.time()
@@ -751,8 +752,12 @@ class SciTwiOverlay:
         else:
             self.current_emotion = "idle"
 
-    def show_response_card(self, text: str, user_query: str = "", emotion: str = ""):
-        """Display an on-screen speech bubble card showing Twilight's full response."""
+    def show_response_card(self, text: str, user_query: str = "", emotion: str = "", is_trailer: bool = False):
+        """Display an on-screen speech bubble card showing Twilight's full response or status trailer."""
+        self.is_trailer = is_trailer
+        if not is_trailer:
+            self.is_processing = False
+
         m = re.search(r'\[(?:emotion|mood):\s*(\w+)\]', text, re.IGNORECASE)
         if m:
             tag_emo = m.group(1).lower()
@@ -793,8 +798,9 @@ class SciTwiOverlay:
 
     def dismiss_response(self):
         """Dismiss the on-screen speech bubble and transition to live ambient state (music, reading, analyzing, or idle)."""
-        if getattr(self, "is_processing", False):
+        if getattr(self, "is_processing", False) and not getattr(self, "is_trailer", False):
             return
+        self.is_trailer = False
         self.show_response = False
         self.restore_ambient_state()
 
@@ -988,18 +994,27 @@ class SciTwiOverlay:
 
         # Auto-close speech bubble after reading duration (scaled by length, pause while hovering/scrolling)
         if self.show_response:
-            if getattr(self, "is_processing", False):
-                self.response_start_time = time.time()  # Keep persistently open while processing
+            words = len(self.response_text.split())
+            read_duration = max(4.0, min(14.0, 2.0 + words * 0.16))
+            self._current_read_duration = read_duration
+            mx, my = pygame.mouse.get_pos()
+            is_hovering = resp_card_rect.collidepoint(mx, my)
+            if is_hovering:
+                self.last_response_hover_time = time.time()
+            hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 2.0
+
+            time_open = time.time() - self.response_start_time
+
+            if getattr(self, "is_trailer", False):
+                # Safety cap: auto-dismiss trailer bubble after 15s if background tool hangs
+                if time_open > 15.0:
+                    self.dismiss_response()
             else:
-                words = len(self.response_text.split())
-                read_duration = max(4.0, min(14.0, 2.0 + words * 0.16))
-                self._current_read_duration = read_duration
-                mx, my = pygame.mouse.get_pos()
-                is_hovering = resp_card_rect.collidepoint(mx, my)
-                if is_hovering:
-                    self.last_response_hover_time = time.time()
-                hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 2.0
-                if (not is_hovering and not hover_cushion) and (time.time() - self.response_start_time > read_duration):
+                # Normal dialogue bubble dismissal: close when duration elapsed and user is not hovering
+                if (not is_hovering and not hover_cushion) and (time_open > read_duration):
+                    self.dismiss_response()
+                elif not is_hovering and (time_open > read_duration + 8.0):
+                    # Hard safety ceiling: always close after read_duration + 8s if user isn't actively hovering
                     self.dismiss_response()
 
         # Safety: if user released mouse button anywhere in Windows while dragging, release drag
@@ -1244,15 +1259,15 @@ class SciTwiOverlay:
             self._render_thinking_card(think_card_rect)
 
         # 3. Render Voice Listening Card if active
-        if self.voice_state in ("listening", "recording", "processing") and not self.show_input and not self.show_response:
+        if self.voice_state in ("listening", "recording", "processing") and not self.show_response:
             self._render_voice_card(voice_card_rect)
 
         # 4. Render Speech Bubble / Response Card if dialogue is active
         if self.show_response:
             self._render_response_card(resp_card_rect)
 
-        # 5. Render Input Card if typing
-        if self.show_input:
+        # 5. Render Input Card if typing (and voice card is not active)
+        if self.show_input and self.voice_state == "idle":
             self._render_input_box(input_card_rect)
 
         pygame.display.update()
@@ -1342,8 +1357,10 @@ class SciTwiOverlay:
         # Layer 4: Companion Character Sprite with Dynamic Emotion & Tilt
         if self.is_dragging:
             sprite_key = "when_dragged" if "when_dragged" in self.expressions else "flustered"
-        elif self.voice_state in ("listening", "recording", "processing"):
-            sprite_key = "talking" if self.voice_state == "recording" else "thinking"
+        elif self.voice_state in ("listening", "recording"):
+            sprite_key = "idle"  # Twilight is listening attentively to user speech—never talking
+        elif self.voice_state == "processing":
+            sprite_key = "thinking"
         elif self.state == "thinking":
             sprite_key = "thinking"
         elif self.state == "music":

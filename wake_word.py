@@ -29,11 +29,13 @@ class WakeWordDetector:
         on_wake: Callable[[str], None],
         is_speaking_fn: Optional[Callable[[], bool]] = None,
         is_voice_active_fn: Optional[Callable[[], bool]] = None,
+        is_processing_fn: Optional[Callable[[], bool]] = None,
     ):
         self.config = config
         self.on_wake = on_wake
         self.is_speaking_fn = is_speaking_fn
         self.is_voice_active_fn = is_voice_active_fn
+        self.is_processing_fn = is_processing_fn
 
         self.enabled = getattr(config, "wake_word_enabled", True)
         self.wake_words = self._clean_phrases(getattr(config, "wake_words", None) or self.DEFAULT_WAKE_WORDS)
@@ -41,6 +43,9 @@ class WakeWordDetector:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
+
+        self.last_suppressed_time = time.time()
+        self.last_wake_time = 0.0
 
         self.model = None
         self.recognizer = None
@@ -118,14 +123,36 @@ class WakeWordDetector:
         with self._lock:
             self._stop_event.set()
 
+    def _is_suppressed(self) -> bool:
+        """Check if wake word detection should be temporarily paused to prevent acoustic loops."""
+        now = time.time()
+        # Suppress if Twilight is speaking (or just finished within 1.2s cooldown)
+        if self.is_speaking_fn and self.is_speaking_fn():
+            self.last_suppressed_time = now
+            return True
+        # Suppress if voice input manager is listening/recording/transcribing
+        if self.is_voice_active_fn and self.is_voice_active_fn():
+            self.last_suppressed_time = now
+            return True
+        # Suppress if brain is actively formulating a reply
+        if self.is_processing_fn and self.is_processing_fn():
+            self.last_suppressed_time = now
+            return True
+        # Post-suppression acoustic cooldown (1.2s to clear room echo and driver buffers)
+        if now - self.last_suppressed_time < 1.2:
+            return True
+        # Minimum debounce interval between wake events (1.5s)
+        if now - self.last_wake_time < 1.5:
+            return True
+        return False
+
     def _listen_loop(self):
         """Continuous background audio stream and keyword spotter."""
         device_idx = getattr(self.config, "mic_device_index", None)
         block_size = 4000  # 250ms at 16kHz
 
         while not self._stop_event.is_set() and self.enabled:
-            # Don't listen while Twilight is speaking or active voice input is transcribing
-            if (self.is_speaking_fn and self.is_speaking_fn()) or (self.is_voice_active_fn and self.is_voice_active_fn()):
+            if self._is_suppressed():
                 time.sleep(0.1)
                 continue
 
@@ -137,32 +164,55 @@ class WakeWordDetector:
                     channels=1,
                     device=device_idx,
                 ) as stream:
+                    if self.recognizer:
+                        self.recognizer.Reset()
+
                     while not self._stop_event.is_set() and self.enabled:
-                        if (self.is_speaking_fn and self.is_speaking_fn()) or (self.is_voice_active_fn and self.is_voice_active_fn()):
-                            time.sleep(0.1)
-                            # Reset recognizer state to prevent stale audio buffer triggers
+                        if self._is_suppressed():
+                            # Flush all pending stream audio and reset Kaldi grammar state
+                            try:
+                                while stream.read_available >= block_size:
+                                    stream.read(block_size)
+                            except Exception:
+                                pass
                             if self.recognizer:
                                 self.recognizer.Reset()
+                            time.sleep(0.1)
                             continue
 
                         data, overflowed = stream.read(block_size)
                         if not data or len(data) == 0:
                             continue
 
+                        matched = False
                         if self.recognizer.AcceptWaveform(bytes(data)):
                             res = json.loads(self.recognizer.Result())
                             text = res.get("text", "").strip().lower()
                             if self._match_wake_word(text):
-                                break
+                                matched = True
                         else:
                             partial = json.loads(self.recognizer.PartialResult())
                             p_text = partial.get("partial", "").strip().lower()
                             if self._match_wake_word(p_text):
-                                break
+                                matched = True
+
+                        if matched:
+                            now = time.time()
+                            self.last_wake_time = now
+                            self.last_suppressed_time = now
+                            # Drain residual audio so VoiceInputManager gets a fresh stream
+                            try:
+                                while stream.read_available > 0:
+                                    stream.read(min(block_size, stream.read_available))
+                            except Exception:
+                                pass
+                            if self.recognizer:
+                                self.recognizer.Reset()
+                            break
 
             except Exception as e:
                 # Silently back off on device busy / disconnection
-                time.sleep(1.0)
+                time.sleep(0.5)
 
     def _match_wake_word(self, detected_text: str) -> bool:
         if not detected_text:

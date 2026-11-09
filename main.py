@@ -64,8 +64,22 @@ def main():
         "next_interval": random.uniform(300.0, 600.0)
     }
 
+    last_query_tracker = {"text": "", "time": 0.0}
+
     def on_user_submit(user_prompt: str):
-        state_tracker["last_speech_time"] = time.time()
+        if not user_prompt or not user_prompt.strip():
+            return
+        user_prompt = user_prompt.strip()
+
+        # Deduplicate identical consecutive voice/text commands arriving within 2.8s
+        now = time.time()
+        if user_prompt.lower() == last_query_tracker["text"].lower() and (now - last_query_tracker["time"] < 2.8):
+            print(f"[Main] Dropping rapid duplicate submission: '{user_prompt}'")
+            return
+        last_query_tracker["text"] = user_prompt
+        last_query_tracker["time"] = now
+
+        state_tracker["last_speech_time"] = now
         print(f"User query received: {user_prompt}")
         ov = overlay_ref[0]
         if ov:
@@ -97,46 +111,55 @@ def main():
                 overlay.show_response = False
                 overlay.set_state("thinking", "Formulating a reply...", query=user_prompt)
 
-            def on_status_trailer(trailer_text: str):
+            try:
+                def on_status_trailer(trailer_text: str):
+                    if overlay:
+                        overlay.show_response_card(trailer_text, user_query=user_prompt, is_trailer=True)
+                    audio.speak(trailer_text)
+
+                response_text = brain.query(user_prompt, status_callback=on_status_trailer)
+                active_m = getattr(brain, "last_used_model", getattr(brain.config, "model", "default"))
+                print(f"[Twilight ({active_m})]: {response_text}")
+
+                # Stop any lingering status trailer speech so the main response callbacks never get stuck
+                audio.stop()
+
+                card_shown = [False]
+
+                def show_card_sync():
+                    if not card_shown[0] and overlay:
+                        card_shown[0] = True
+                        overlay.is_processing = False
+                        overlay.is_trailer = False
+                        overlay.show_response_card(response_text, user_query=user_prompt)
+                        overlay.set_state("speaking")
+
+                def on_done():
+                    if overlay:
+                        overlay.is_processing = False
+                        overlay.is_trailer = False
+                        # Allow a concise 3.2s reading window after speech completes
+                        dur = getattr(overlay, "_current_read_duration", 5.0)
+                        overlay.response_start_time = time.time() - max(0.0, dur - 3.2)
+                        overlay.restore_ambient_state()
+
+                # Fallback timer: ensure card displays within 6.5s if cloud TTS has a network delay
+                fallback_timer = threading.Timer(6.5, show_card_sync)
+                fallback_timer.daemon = True
+                fallback_timer.start()
+
+                def on_start():
+                    fallback_timer.cancel()
+                    show_card_sync()
+
+                audio.speak(response_text, on_start=on_start, on_done=on_done)
+
+            except Exception as e:
+                print(f"[Main] Error formulating response: {e}")
                 if overlay:
-                    overlay.show_response_card(trailer_text, user_query=user_prompt)
-                    overlay.set_state("thinking", query=user_prompt)
-                audio.speak(trailer_text)
-
-            response_text = brain.query(user_prompt, status_callback=on_status_trailer)
-            active_m = getattr(brain, "last_used_model", getattr(brain.config, "model", "default"))
-            print(f"[Twilight ({active_m})]: {response_text}")
-
-            # Stop any lingering status trailer speech so the main response callbacks never get stuck
-            audio.stop()
-
-            card_shown = [False]
-
-            def show_card_sync():
-                if not card_shown[0] and overlay:
-                    card_shown[0] = True
                     overlay.is_processing = False
-                    overlay.show_response_card(response_text, user_query=user_prompt)
-                    overlay.set_state("speaking")
-
-            def on_done():
-                if overlay:
-                    overlay.is_processing = False
-                    # Allow a concise 3.2s reading window after speech completes
-                    dur = getattr(overlay, "_current_read_duration", 5.0)
-                    overlay.response_start_time = time.time() - max(0.0, dur - 3.2)
-                    overlay.restore_ambient_state()
-
-            # Fallback timer: ensure card displays within 6.5s if cloud TTS has a network delay
-            fallback_timer = threading.Timer(6.5, show_card_sync)
-            fallback_timer.daemon = True
-            fallback_timer.start()
-
-            def on_start():
-                fallback_timer.cancel()
-                show_card_sync()
-
-            audio.speak(response_text, on_start=on_start, on_done=on_done)
+                    overlay.is_trailer = False
+                    overlay.show_response_card(f"Whoops, analysis mainframe hiccup: {e}", user_query=user_prompt)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -153,7 +176,7 @@ def main():
             ov.voice_state = new_state
             ov.voice_details = details
             if new_state in ("listening", "recording"):
-                ov.set_state("thinking", details)
+                ov.set_state("idle", details)
             elif new_state == "processing":
                 ov.set_state("thinking", "Processing voice command...")
             elif new_state == "idle":
@@ -198,7 +221,8 @@ def main():
         print(f"[Twilight] Wake phrase recognized: '{phrase}'!")
         ov = overlay_ref[0]
         if ov:
-            ov.summon()
+            ov.show_input = False
+            ov.show_response = False
         voice_mgr.start_listening()
 
     wake_detector = WakeWordDetector(
@@ -206,6 +230,7 @@ def main():
         on_wake=on_wake_detected,
         is_speaking_fn=audio.is_speaking,
         is_voice_active_fn=voice_mgr.is_active,
+        is_processing_fn=lambda: (overlay_ref[0].is_processing if overlay_ref[0] else False),
     )
 
     # 7. Register Global Hotkeys (Ctrl+Shift+Space summon, Ctrl+Shift+V voice, Ctrl+Shift+P perch, Ctrl+Shift+Q study)
