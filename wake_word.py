@@ -40,7 +40,7 @@ class WakeWordDetector:
         self.enabled = getattr(config, "wake_word_enabled", True)
         self.wake_words = self._clean_phrases(getattr(config, "wake_words", None) or self.DEFAULT_WAKE_WORDS)
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
 

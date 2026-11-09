@@ -45,7 +45,7 @@ class VoiceInputManager:
         self.on_error = on_error
 
         self.state = self.STATE_IDLE
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._cancel_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
