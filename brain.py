@@ -330,12 +330,13 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "adjust_volume",
-            "description": "Adjust Windows master audio volume with exact 1% percentage precision (0-100) or by step action ('up', 'down', 'mute', 'unmute').",
+            "description": "Adjust Windows audio volume with exact 1% percentage precision (0-100) or by step action ('up', 'down', 'mute', 'unmute'). Can target master system volume or a specific application like 'spotify', 'chrome', 'discord', etc.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["up", "down", "mute", "unmute"], "default": "up"},
-                    "percentage": {"type": "integer", "description": "Exact master volume percentage 0-100"}
+                    "action": {"type": "string", "enum": ["up", "down", "mute", "unmute", "set"], "default": "up"},
+                    "percentage": {"type": "integer", "description": "Exact volume percentage 0-100"},
+                    "app_name": {"type": "string", "description": "Optional target application name, e.g. 'spotify', 'chrome', 'discord'. If omitted, controls system master volume.", "default": ""}
                 }
             }
         }
@@ -846,18 +847,36 @@ class SciTwiBrain:
             _exec_record(switch_tab, "next")
             return "[emotion: happy] Switched to the next tab for you!"
 
-        # 9. Master Volume Percentage & Controls
-        m_vol_pct = re.search(r'\b(?:set\s+)?volume\s+(?:to\s+)?(\d+)(?:\s*%)?\b|\b(\d+)\s*%\s+volume\b', user_lower)
-        if m_vol_pct and "video" not in user_lower:
-            pct = int(m_vol_pct.group(1) or m_vol_pct.group(2))
-            _exec_record(adjust_volume, percentage=pct)
-            return f"[emotion: happy] Set volume to {pct}% for you!"
+        # 9. Application & Master Volume Controls (Spotify, Chrome, Discord, Master, etc.)
+        if ("volume" in user_lower or re.search(r'\b(?:mute|unmute)\b', user_lower)) and "video" not in user_lower:
+            known_apps = ('spotify', 'chrome', 'discord', 'edge', 'firefox', 'vlc', 'steam', 'browser', 'music')
+            detected_app = ""
+            for app in known_apps:
+                if re.search(rf'\b{app}\b', user_lower):
+                    detected_app = app
+                    break
 
-        m_vol_act = re.search(r'\b(?:turn\s+)?volume\s+(up|down)\b|\b(mute|unmute)\s+volume\b|\bvolume\s+(mute|unmute)\b', user_lower)
-        if m_vol_act and "video" not in user_lower:
-            act = m_vol_act.group(1) or m_vol_act.group(2) or m_vol_act.group(3)
-            _exec_record(adjust_volume, action=act)
-            return f"[emotion: happy] Adjusted volume {act} for you!"
+            if not detected_app:
+                m_app_phrase = re.search(r'\bvolume\s+(?:on|for|in|of)\s+([a-zA-Z0-9_\-]+)\b|\b([a-zA-Z0-9_\-]+)\s+volume\b', user_lower)
+                if m_app_phrase:
+                    cand = (m_app_phrase.group(1) or m_app_phrase.group(2) or '').strip()
+                    if cand not in ('set', 'master', 'system', 'pc', 'the', 'my', 'up', 'down', 'mute', 'unmute', 'turn'):
+                        detected_app = cand
+
+            m_pct = re.search(r'(\d+)\s*%', user_lower) or re.search(r'\b(?:to\s+|at\s+)?(\d+)\b', user_lower)
+            pct = int(m_pct.group(1)) if m_pct and int(m_pct.group(1)) <= 100 else None
+
+            is_mute = bool(re.search(r'\bmute\b', user_lower) and 'unmute' not in user_lower)
+            is_unmute = bool(re.search(r'\bunmute\b', user_lower))
+            is_up = bool(re.search(r'\b(?:up|raise|higher|increase)\b', user_lower))
+            is_down = bool(re.search(r'\b(?:down|lower|quieter|decrease|reduce)\b', user_lower))
+
+            action = 'unmute' if is_unmute else ('mute' if is_mute else ('up' if is_up else ('down' if is_down else 'set')))
+
+            if pct is not None or is_mute or is_unmute or is_up or is_down:
+                res = _exec_record(adjust_volume, action=action, percentage=pct, app_name=detected_app)
+                emo = "music" if detected_app in ("spotify", "music") else "happy"
+                return f"[emotion: {emo}] {res}"
 
         # 10. Dynamic Scrolling & Centering
         if re.search(r'\b(?:scroll\s+(?:the\s+)?(?:playlist|spotify)|scroll\s+down\s+(?:the\s+)?playlist)\b', user_lower):
@@ -1293,14 +1312,14 @@ class SciTwiBrain:
                 res = close_window()
             elif name == "type_in_document":
                 res = type_in_document(args.get("text", ""))
-            elif name == "adjust_volume":
+            elif name in ("adjust_volume", "adjust_app_volume"):
                 pct = args.get("percentage")
                 if pct is not None:
                     try:
                         pct = int(pct)
                     except Exception:
                         pct = None
-                res = adjust_volume(args.get("action", "up"), percentage=pct)
+                res = adjust_volume(args.get("action", "up"), percentage=pct, app_name=args.get("app_name", ""))
             elif name == "adjust_brightness":
                 res = adjust_brightness(args.get("level", 50))
             elif name == "open_new_tab":

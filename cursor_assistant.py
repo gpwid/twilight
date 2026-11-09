@@ -1454,6 +1454,164 @@ def _get_audio_endpoint_volume():
         print(f"[Cursor] Core Audio COM error: {e}")
         return None
 
+def _get_audio_session_manager():
+    """Retrieve Windows WASAPI Audio Session Manager for per-application volume control."""
+    try:
+        import subprocess
+        from comtypes import GUID, IUnknown, COMMETHOD, HRESULT, POINTER, c_int
+        from ctypes import c_float, c_uint, c_void_p, byref
+        from ctypes.wintypes import DWORD, BOOL, LPWSTR
+        import comtypes.client
+
+        class IMMDevice(IUnknown):
+            _iid_ = GUID('{D666063F-1587-4E43-81F1-B948E807363F}')
+            _methods_ = [
+                COMMETHOD([], HRESULT, 'Activate',
+                    (['in'], POINTER(GUID), 'iid'),
+                    (['in'], c_uint, 'dwClsCtx'),
+                    (['in'], c_void_p, 'pActivationParams'),
+                    (['out'], POINTER(POINTER(IUnknown)), 'ppInterface')),
+            ]
+
+        class IMMDeviceEnumerator(IUnknown):
+            _iid_ = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
+            _methods_ = [
+                COMMETHOD([], HRESULT, 'EnumAudioEndpoints'),
+                COMMETHOD([], HRESULT, 'GetDefaultAudioEndpoint',
+                    (['in'], c_int, 'dataFlow'),
+                    (['in'], c_int, 'role'),
+                    (['out'], POINTER(POINTER(IMMDevice)), 'ppEndpoint')),
+            ]
+
+        class ISimpleAudioVolume(IUnknown):
+            _iid_ = GUID('{87CE5498-68D6-44E5-9215-6DA47EF883D8}')
+            _methods_ = [
+                COMMETHOD([], HRESULT, 'SetMasterVolume',
+                    (['in'], c_float, 'fLevelNorm'),
+                    (['in'], c_void_p, 'EventContext')),
+                COMMETHOD([], HRESULT, 'GetMasterVolume',
+                    (['out'], POINTER(c_float), 'pfLevelNorm')),
+                COMMETHOD([], HRESULT, 'SetMute',
+                    (['in'], BOOL, 'bMute'),
+                    (['in'], c_void_p, 'EventContext')),
+                COMMETHOD([], HRESULT, 'GetMute',
+                    (['out'], POINTER(BOOL), 'pbMute')),
+            ]
+
+        class IAudioSessionControl2(IUnknown):
+            _iid_ = GUID('{bfb7ff88-7239-4fc9-8fa2-07c950be9c6d}')
+            _methods_ = [
+                COMMETHOD([], HRESULT, 'GetState', (['out'], POINTER(c_int), 'pRetVal')),
+                COMMETHOD([], HRESULT, 'GetDisplayName', (['out'], POINTER(LPWSTR), 'pRetVal')),
+                COMMETHOD([], HRESULT, 'SetDisplayName'),
+                COMMETHOD([], HRESULT, 'GetIconPath'),
+                COMMETHOD([], HRESULT, 'SetIconPath'),
+                COMMETHOD([], HRESULT, 'GetGroupingParam'),
+                COMMETHOD([], HRESULT, 'SetGroupingParam'),
+                COMMETHOD([], HRESULT, 'RegisterAudioSessionNotification'),
+                COMMETHOD([], HRESULT, 'UnregisterAudioSessionNotification'),
+                COMMETHOD([], HRESULT, 'GetSessionIdentifier'),
+                COMMETHOD([], HRESULT, 'GetSessionInstanceIdentifier'),
+                COMMETHOD([], HRESULT, 'GetProcessId', (['out'], POINTER(DWORD), 'pRetVal')),
+                COMMETHOD([], HRESULT, 'IsSystemSoundsSession'),
+                COMMETHOD([], HRESULT, 'SetDuckingPreference'),
+            ]
+
+        class IAudioSessionEnumerator(IUnknown):
+            _iid_ = GUID('{E2F5606F-473C-43C0-9EA3-4260D80499D6}')
+            _methods_ = [
+                COMMETHOD([], HRESULT, 'GetCount', (['out'], POINTER(c_int), 'SessionCount')),
+                COMMETHOD([], HRESULT, 'GetSession',
+                    (['in'], c_int, 'SessionCount'),
+                    (['out'], POINTER(POINTER(IUnknown)), 'Session')),
+            ]
+
+        class IAudioSessionManager2(IUnknown):
+            _iid_ = GUID('{77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F}')
+            _methods_ = [
+                COMMETHOD([], HRESULT, 'GetAudioSessionControl'),
+                COMMETHOD([], HRESULT, 'GetSimpleAudioVolume'),
+                COMMETHOD([], HRESULT, 'GetSessionEnumerator',
+                    (['out'], POINTER(POINTER(IAudioSessionEnumerator)), 'SessionEnum')),
+            ]
+
+        CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
+        enumerator = comtypes.client.CreateObject(CLSID_MMDeviceEnumerator, interface=IMMDeviceEnumerator)
+        endpoint = enumerator.GetDefaultAudioEndpoint(0, 1) # eRender, eMultimedia
+        mgr = endpoint.Activate(byref(IAudioSessionManager2._iid_), 23, None).QueryInterface(IAudioSessionManager2)
+        return mgr, IAudioSessionControl2, ISimpleAudioVolume
+    except Exception as e:
+        print(f"[Cursor] Audio session manager error: {e}")
+        return None, None, None
+
+def set_app_volume_wasapi(app_name: str, percentage: int = None, action: str = "set") -> tuple[bool, str, int]:
+    """Control volume or mute state for any Windows application via WASAPI audio sessions."""
+    mgr, IAudioSessionControl2, ISimpleAudioVolume = _get_audio_session_manager()
+    if not mgr:
+        return False, app_name, 0
+
+    session_enum = mgr.GetSessionEnumerator()
+    count = session_enum.GetCount()
+    
+    app_target = app_name.lower().replace(".exe", "").strip()
+    alias_map = {
+        "spotify": ["spotify"],
+        "music": ["spotify", "musicbee", "aimp", "foobar2000"],
+        "browser": ["chrome", "msedge", "firefox", "brave", "opera"],
+        "chrome": ["chrome"],
+        "edge": ["msedge"],
+        "firefox": ["firefox"],
+        "discord": ["discord"],
+        "vlc": ["vlc"],
+        "game": ["game", "steam"],
+    }
+    targets = alias_map.get(app_target, [app_target])
+
+    found = False
+    matched_app_name = app_name.capitalize()
+    final_pct = 0
+
+    for i in range(count):
+        ctl = session_enum.GetSession(i).QueryInterface(IAudioSessionControl2)
+        pid = ctl.GetProcessId()
+        if pid <= 0:
+            continue
+        try:
+            pname = psutil.Process(pid).name().lower().replace(".exe", "")
+        except Exception:
+            continue
+
+        if any(t in pname or pname in t for t in targets):
+            matched_app_name = pname.capitalize()
+            vol = session_enum.GetSession(i).QueryInterface(ISimpleAudioVolume)
+            
+            act = (action or "").lower().strip()
+            if "unmute" in act:
+                vol.SetMute(0, None)
+                cur_v = vol.GetMasterVolume()
+                final_pct = int(cur_v * 100)
+                found = True
+            elif "mute" in act:
+                vol.SetMute(1, None)
+                final_pct = 0
+                found = True
+            elif percentage is not None:
+                scalar = max(0.0, min(1.0, float(percentage) / 100.0))
+                vol.SetMasterVolume(scalar, None)
+                vol.SetMute(0, None)
+                final_pct = int(scalar * 100)
+                found = True
+            elif "up" in act or "down" in act:
+                cur = vol.GetMasterVolume()
+                delta = 0.10
+                new_vol = min(1.0, cur + delta) if "up" in act else max(0.0, cur - delta)
+                vol.SetMasterVolume(new_vol, None)
+                vol.SetMute(0, None)
+                final_pct = int(new_vol * 100)
+                found = True
+
+    return found, matched_app_name, final_pct
+
 def get_master_volume_scalar() -> float:
     """Return current Windows master volume as a float between 0.0 and 1.0."""
     vol = _get_audio_endpoint_volume()
@@ -1487,27 +1645,76 @@ def set_master_volume_mute(mute: bool) -> bool:
             print(f"[Cursor] set_master_volume_mute error: {e}")
     return False
 
-def adjust_volume_with_cursor(action: str = "up", percentage: int = None):
-    """Adjust system master volume natively via Windows Core Audio endpoint with exact percentage precision."""
+def adjust_volume_with_cursor(action: str = "up", percentage: int = None, app_name: str = ""):
+    """Adjust system master volume, Spotify volume, or any specific app's volume natively via Windows Core Audio endpoint."""
     attach_desktop()
-
-    # 1. Exact percentage requested
-    if percentage is not None:
-        scalar = max(0.0, min(1.0, float(percentage) / 100.0))
-        return set_master_volume_scalar(scalar)
+    import subprocess
 
     act = (action or "").strip().lower()
+    app_target = (app_name or "").strip().lower()
+
+    # 1. Target Application Volume Control (Spotify, Chrome, Discord, etc.)
+    if app_target and app_target not in ("master", "system", "pc", "computer", "windows"):
+        # Special direct controller for Spotify player
+        if app_target in ("spotify", "music"):
+            cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+            if os.path.exists(cli):
+                no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if "unmute" in act:
+                    subprocess.run([cli, "volume", "0.50"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    set_app_volume_wasapi("spotify", percentage=50, action="unmute")
+                    return "Unmuted Spotify playback for you!"
+                elif "mute" in act:
+                    subprocess.run([cli, "volume", "0.0"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    set_app_volume_wasapi("spotify", action="mute")
+                    return "Muted Spotify playback for you."
+                elif percentage is not None:
+                    scalar = max(0.0, min(1.0, float(percentage) / 100.0))
+                    subprocess.run([cli, "volume", f"{scalar:.2f}"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    set_app_volume_wasapi("spotify", percentage=100, action="unmute")
+                    return f"Set Spotify volume to {percentage}% for you!"
+                elif "up" in act or "down" in act:
+                    cur_scalar = 0.50
+                    ok, _, wasapi_vol = set_app_volume_wasapi("spotify", action=act)
+                    if ok:
+                        cur_scalar = float(wasapi_vol) / 100.0
+                    else:
+                        cur_scalar = max(0.0, min(1.0, cur_scalar + (0.10 if "up" in act else -0.10)))
+                    subprocess.run([cli, "volume", f"{cur_scalar:.2f}"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    return f"Adjusted Spotify volume {act} to {int(cur_scalar * 100)}% for you!"
+
+        # General application volume via Windows WASAPI Audio Sessions (Chrome, Discord, Edge, VLC, etc.)
+        ok, matched_app, final_vol = set_app_volume_wasapi(app_target, percentage=percentage, action=act)
+        if ok:
+            if "unmute" in act:
+                return f"Unmuted {matched_app} audio for you!"
+            elif "mute" in act:
+                return f"Muted {matched_app} for you."
+            elif percentage is not None:
+                return f"Set {matched_app} volume to {final_vol}% for you!"
+            return f"Adjusted {matched_app} volume {act} to {final_vol}% for you!"
+        else:
+            return f"I couldn't locate an active audio session for '{app_name}'. Make sure the app is open and playing sound!"
+
+    # 2. Master System Volume Control
+    if percentage is not None:
+        scalar = max(0.0, min(1.0, float(percentage) / 100.0))
+        set_master_volume_scalar(scalar)
+        return f"Set master volume to {percentage}% for you!"
+
     m_pct = re.search(r'(\d+)\s*%', act)
     if m_pct:
         scalar = float(m_pct.group(1)) / 100.0
-        return set_master_volume_scalar(scalar)
+        set_master_volume_scalar(scalar)
+        return f"Set master volume to {m_pct.group(1)}% for you!"
 
     if "unmute" in act:
-        return set_master_volume_mute(False)
+        set_master_volume_mute(False)
+        return "Unmuted master audio for you!"
     elif "mute" in act:
-        return set_master_volume_mute(True)
+        set_master_volume_mute(True)
+        return "Toggled master audio mute for you."
 
-    # 2. Relative change based on live Core Audio volume
     cur = get_master_volume_scalar()
     delta = 0.10
     m_diff = re.search(r'(\d+)', act)
@@ -1519,7 +1726,8 @@ def adjust_volume_with_cursor(action: str = "up", percentage: int = None):
     else:
         new_vol = min(1.0, cur + delta)
 
-    return set_master_volume_scalar(new_vol)
+    set_master_volume_scalar(new_vol)
+    return f"Adjusted volume {action} to {int(new_vol * 100)}% for you!"
 
 def scroll_page_with_cursor(direction: str = "down", amount: int = 400, center_text: str = ""):
     """Smoothly scroll active window or browser, optionally centering a matching section or text."""

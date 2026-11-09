@@ -1003,6 +1003,11 @@ class SciTwiOverlay:
                 self.last_response_hover_time = time.time()
             hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 2.0
 
+            # Never count down or close while Twilight is actively speaking through TTS
+            is_speaking = bool(getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn())
+            if is_speaking:
+                self.response_start_time = time.time()
+
             time_open = time.time() - self.response_start_time
 
             if getattr(self, "is_trailer", False):
@@ -1010,10 +1015,10 @@ class SciTwiOverlay:
                 if time_open > 15.0:
                     self.dismiss_response()
             else:
-                # Normal dialogue bubble dismissal: close when duration elapsed and user is not hovering
-                if (not is_hovering and not hover_cushion) and (time_open > read_duration):
+                # Normal dialogue bubble dismissal: close only after speech finishes, reading duration elapsed, and user is not hovering
+                if not is_speaking and (not is_hovering and not hover_cushion) and (time_open > read_duration):
                     self.dismiss_response()
-                elif not is_hovering and (time_open > read_duration + 8.0):
+                elif not is_speaking and not is_hovering and (time_open > read_duration + 8.0):
                     # Hard safety ceiling: always close after read_duration + 8s if user isn't actively hovering
                     self.dismiss_response()
 

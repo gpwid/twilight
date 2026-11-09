@@ -138,9 +138,9 @@ def main():
                     if overlay:
                         overlay.is_processing = False
                         overlay.is_trailer = False
-                        # Allow a concise 3.2s reading window after speech completes
-                        dur = getattr(overlay, "_current_read_duration", 5.0)
-                        overlay.response_start_time = time.time() - max(0.0, dur - 3.2)
+                        # Allow a clean 3.5s reading window after speech completes
+                        overlay.response_start_time = time.time()
+                        overlay._current_read_duration = 3.5
                         overlay.restore_ambient_state()
 
                 # Fallback timer: ensure card displays within 6.5s if cloud TTS has a network delay

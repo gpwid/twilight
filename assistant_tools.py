@@ -2192,20 +2192,16 @@ def type_in_document(text: str) -> str:
     except Exception as e:
         return f"Error typing in document: {e}"
 
-def adjust_volume(action: str = "up", percentage: int = None) -> str:
-    """Adjust Windows master audio volume with exact 1% percentage precision (0-100) or relative ('up', 'down', 'mute', 'unmute')."""
+def adjust_volume(action: str = "up", percentage: int = None, app_name: str = "") -> str:
+    """Adjust Windows master audio volume, Spotify volume, or any specific app's volume (Chrome, Discord, VLC, etc.) with exact 1% precision (0-100) or relative ('up', 'down', 'mute', 'unmute')."""
     mark_action_tool_executed()
     try:
         import cursor_assistant
-        cursor_assistant.adjust_volume_with_cursor(action, percentage=percentage)
-        if percentage is not None:
-            return f"Set master volume to {percentage}% for you!"
-        act_lower = action.lower().strip()
-        if "mute" in act_lower:
-            return "Toggled master audio mute for you."
-        return f"Adjusted volume {action} for you!"
+        return cursor_assistant.adjust_volume_with_cursor(action=action, percentage=percentage, app_name=app_name)
     except Exception as e:
         return f"Error adjusting volume: {e}"
+
+adjust_app_volume = adjust_volume
 
 def scroll_page(direction: str = "down", amount: int = 400, center_text: str = "") -> str:
     """Smoothly scroll the active window or browser (e.g. Google search, Wikipedia, document), optionally centering matching text."""
