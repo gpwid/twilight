@@ -1011,11 +1011,13 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
                     subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
                     subprocess.run([cli, "navigate", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
                     meta = get_track_metadata(target_uri)
-                    if meta:
-                        t_name, t_art, t_alb, t_year = meta
-                        alb_str = f" (Album: '{t_alb}' ({t_year}))" if t_alb else ""
-                        return f"Playing '{t_name}' by {t_art}{alb_str} on Spotify."
-                    return f"Playing '{picked_title}' on Spotify!"
+                    t_name = meta.get("name") or picked_title
+                    t_art = meta.get("artist") or ""
+                    t_alb = meta.get("album") or ""
+                    t_year = meta.get("year") or ""
+                    art_str = f" by {t_art}" if t_art else ""
+                    alb_str = f" (Album: '{t_alb}' ({t_year}))" if (t_alb and t_year) else (f" (Album: '{t_alb}')" if t_alb else "")
+                    return f"Playing '{t_name}'{art_str}{alb_str} on Spotify."
 
             # 1. Check if clean matches top album or top artist on Spotify
             top_art = None

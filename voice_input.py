@@ -55,7 +55,7 @@ class VoiceInputManager:
         self.sample_rate = 16000
         self.block_size = 640  # 40ms at 16kHz
         self.silence_timeout = getattr(config, "mic_silence_timeout", 1.2)
-        self.energy_threshold = getattr(config, "mic_energy_threshold", 400)
+        self.energy_threshold = getattr(config, "mic_energy_threshold", 30)
         self.stt_engine = getattr(config, "stt_engine", "groq_whisper")
 
     def _set_state(self, new_state: str, details: str = ""):

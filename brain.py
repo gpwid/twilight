@@ -743,6 +743,27 @@ class SciTwiBrain:
             _exec_record(control_spotify, "previous")
             return "[emotion: music] Went back to the previous track for you!"
 
+        # Direct Spotify Play Fast-Path (<0.5s playback without double LLM network round-trips)
+        user_clean_music = re.sub(r'[\.\?!,]+$', '', user_lower).strip()
+        m_play_spotify = re.search(
+            r'^(?:(?:hey|hi|hello)\b[,\s]*(?:twilight|twi)?\b[,\s]*)?'
+            r'(?:please\s+)?(?:(?:can|could)\s+you\s+)?'
+            r'(?:open\s+(?:up\s+)?spotify\s+and\s+)?'
+            r'(?:play|put\s+on|listen\s+to|shuffle)\s+(.+?)(?:\s+on\s+spotify)?$',
+            user_clean_music
+        )
+        if m_play_spotify:
+            song_q = m_play_spotify.group(1).strip()
+            is_explicit_music = any(k in user_clean_music for k in ("spotify", "song", "track", "album", "artist", "discography", "playlist")) or " by " in song_q
+            is_non_music = any(k in song_q for k in ("video", "youtube", "yt", "game", "chess", "stream", "tab", "window", "browser", "page", "movie", "series"))
+            if is_explicit_music and not is_non_music:
+                is_rand = bool(re.search(r'\b(?:random|any|shuffle|some|something|whatever)\b', user_clean_music))
+                if "playlist" in song_q.lower():
+                    res = _exec_record(play_playlist, song_q)
+                else:
+                    res = _exec_record(play_spotify, song_q, is_random=is_rand)
+                return f"[emotion: music] {res}"
+
         # Direct YouTube play
         m_yt_play = re.search(r'^(?:please\s+)?(?:open\s+(?:up\s+)?youtube\s+and\s+play|play|watch|pull up)\s+(?:a\s+)?(?:youtube\s+video\s+(?:of|from|about)?\s*|video\s+(?:of|from|about)?\s*)?(.+?)(?:\s+on\s+youtube)?$', user_lower)
         if m_yt_play and any(k in user_lower for k in ("youtube", "video", "yt", "livestream", "stream")) and not any(k in user_lower for k in ("spotify", "song", "track")):
@@ -1165,8 +1186,8 @@ class SciTwiBrain:
                         self._execute_tool("control_youtube_video", {"action": "play"})
                     elif re.search(r"^\s*(?:please\s+)?(?:resume|unpause)\b(?:\s+(?:the\s+)?(?:song|music|track|spotify|playlist))?$", user_lower):
                         self._execute_tool("control_spotify", {"action": "resume"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:(?:can|could)\s+you\s+)?(?:open\s+up\s+spotify\s+and\s+)?(?:play|put\s+on|listen\s+to|shuffle)\s+(.+)", user_lower):
-                        m_song = re.search(r"^\s*(?:please\s+)?(?:(?:can|could)\s+you\s+)?(?:open\s+up\s+spotify\s+and\s+)?(?:play|put\s+on|listen\s+to|shuffle)\s+(.+)", user_lower)
+                    elif re.search(r"^\s*(?:(?:hey|hi|hello)\b[,\s]*(?:twilight|twi)?\b[,\s]*)?(?:please\s+)?(?:(?:can|could)\s+you\s+)?(?:open\s+up\s+spotify\s+and\s+)?(?:play|put\s+on|listen\s+to|shuffle)\s+(.+)", user_lower):
+                        m_song = re.search(r"^\s*(?:(?:hey|hi|hello)\b[,\s]*(?:twilight|twi)?\b[,\s]*)?(?:please\s+)?(?:(?:can|could)\s+you\s+)?(?:open\s+up\s+spotify\s+and\s+)?(?:play|put\s+on|listen\s+to|shuffle)\s+(.+)", user_lower)
                         song_q = m_song.group(1).strip()
                         if not any(k in song_q for k in ["game", "video", "yt", "youtube"]):
                             if "playlist" in song_q.lower():

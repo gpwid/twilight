@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import threading
 import time
 import random
@@ -460,7 +461,7 @@ def main():
                                 print(f"[AudioManager] Settings updated from disk: engine={new_cfg.tts_engine}")
                             voice_mgr.config = new_cfg
                             voice_mgr.silence_timeout = getattr(new_cfg, "mic_silence_timeout", 1.2)
-                            voice_mgr.energy_threshold = getattr(new_cfg, "mic_energy_threshold", 400)
+                            voice_mgr.energy_threshold = getattr(new_cfg, "mic_energy_threshold", 30)
                             voice_mgr.stt_engine = getattr(new_cfg, "stt_engine", "groq_whisper")
                             wake_detector.reload_config(new_cfg)
                         except Exception as e:

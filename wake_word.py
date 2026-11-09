@@ -185,15 +185,16 @@ class WakeWordDetector:
 
                         is_tts_speaking = bool(self.is_speaking_fn and self.is_speaking_fn())
 
-                        # When Twilight is speaking through speakers, speaker bleed into the mic is quiet to moderate (~150-450 RMS).
+                        # When Twilight is speaking through speakers, speaker bleed into the mic is quiet to moderate (~30-120 RMS).
                         # Near-field voice interruption (calling out "HOY!", "WAIT!", "STOP!", "TWILIGHT!") directly into the mic
-                        # produces much higher energy (RMS >= 720).
+                        # produces much higher energy (RMS >= 200).
                         # We drop low-energy audio while speaking to completely eliminate speaker feedback loops!
-                        if is_tts_speaking and rms < 720.0:
+                        if is_tts_speaking and rms < 200.0:
                             continue
 
-                        # Normal ambient energy gate when idle: ignore quiet room breathing/mouse clicks (<320)
-                        if not is_tts_speaking and rms < 320.0:
+                        # Normal ambient energy gate when idle: ignore quiet room breathing/mouse clicks (<25 RMS)
+                        # while comfortably detecting normal conversational volume (40-120 RMS) on laptop microphones.
+                        if not is_tts_speaking and rms < 25.0:
                             continue
 
                         matched = False
