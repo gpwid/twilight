@@ -563,14 +563,13 @@ class SciTwiOverlay:
                         return True
                     t_low = title.lower()
                     if cls == "Chrome_WidgetWin_1":
-                        # 1. Active Spotify Desktop track is ALWAYS music
+                        # 1. Active Spotify Desktop track: candidate only if " - " in title and not another app
                         if " - " in title and not t_low.startswith("spotify") and not any(
                             b in t_low for b in ("google chrome", "microsoft edge", "brave", "visual studio", "discord", "youtube")
                         ):
-                            media_kind_candidate = "SPOTIFY_PLAYING"
-                            return False
+                            media_kind_candidate = "music"
                         # 2. Dedicated music web players
-                        if any(k in t_low for k in ("youtube music", "soundcloud", "spotify", "apple music", "bandcamp")):
+                        elif any(k in t_low for k in ("youtube music", "soundcloud", "spotify", "apple music", "bandcamp")):
                             media_kind_candidate = "music"
                         # 3. YouTube / Twitch / Netflix / VLC: check if title looks like a song or a normal video
                         elif any(k in t_low for k in ("youtube", "twitch", "netflix", "vlc", "stremio")):
@@ -591,10 +590,7 @@ class SciTwiOverlay:
             except Exception:
                 pass
 
-        if media_kind_candidate == "SPOTIFY_PLAYING":
-            return "music"
-
-        # Check Windows Core Audio Peak Meter to verify audio is actually playing (not paused)
+        # Check Windows Core Audio Peak Meter to verify audio is actually playing (not paused or stopped)
         if media_kind_candidate in ("music", "video"):
             try:
                 if not hasattr(self, "_audio_meter"):
@@ -639,8 +635,10 @@ class SciTwiOverlay:
                     if peak > 0.003:
                         self._last_audio_peak_time = time.time()
                         return media_kind_candidate
-                    if time.time() - getattr(self, "_last_audio_peak_time", 0.0) < 2.0:
+                    if time.time() - getattr(self, "_last_audio_peak_time", 0.0) < 1.0:
                         return media_kind_candidate
+                    # Audio peak is too low: paused, stopped, or silent
+                    return ""
             except Exception:
                 self._audio_meter = None
 
@@ -719,8 +717,14 @@ class SciTwiOverlay:
         if st != self.state or emo != self.current_emotion:
             self.set_state(st, status_msg=msg, emotion=emo)
 
-    def set_state(self, state: str, status_msg: str = "", emotion: str = ""):
+    def set_state(self, state: str, status_msg: str = "", emotion: str = "", query: str = ""):
         """Update companion state, status message, and facial expression."""
+        if query:
+            self.response_query = query
+        if state == "thinking":
+            self.show_response = False
+            self.speech_scroll_y = 0
+
         if state != getattr(self, "state", "") or (emotion and emotion != getattr(self, "current_emotion", "")):
             self.state_change_time = time.time()
 
@@ -754,6 +758,8 @@ class SciTwiOverlay:
             tag_emo = m.group(1).lower()
             text = re.sub(r'\[(?:emotion|mood):\s*\w+\]\s*', '', text, flags=re.IGNORECASE).strip()
             if not emotion and tag_emo in self.expressions:
+                if tag_emo == "music" and any(pw in text.lower() for pw in ("paused", "stopped", "pause", "stop", "quiet")):
+                    tag_emo = "happy"
                 emotion = tag_emo
 
         sub_map = {'0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄', '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉', '+': '⁺', '-': '⁻'}
@@ -763,7 +769,8 @@ class SciTwiOverlay:
         text = re.sub(r'\$([^\$]+)\$', _clean_latex, text).replace('$', '')
 
         self.response_text = text
-        self.response_query = user_query
+        if user_query:
+            self.response_query = user_query
         self.response_start_time = time.time()
         self.show_response = True
         self.show_input = False
@@ -775,9 +782,9 @@ class SciTwiOverlay:
             lower = text.lower()
             if any(w in lower for w in ("blush", "sunset", "sciset", "tease", "stupid boys", "crush", "flustered")):
                 emotion = "flustered"
-            elif any(w in lower for w in ("closed", "closing", "terminated", "killed", "process", "code", "physics", "calculate", "youtube", "video")):
+            elif any(w in lower for w in ("closed", "closing", "terminated", "killed", "process", "code", "physics", "calculate")):
                 emotion = "analyzing"
-            elif any(w in lower for w in ("spotify", "playlist", "track", "album", "song")):
+            elif re.search(r'\b(?:playing|shuffling|started)\s+(?:playlist|track|song|album|spotify)\b', lower) and not any(w in lower for w in ("paused", "stopped")):
                 emotion = "music"
             elif any(w in lower for w in ("error", "sorry", "whoops", "failed", "couldn't")):
                 emotion = "sad"
@@ -985,12 +992,13 @@ class SciTwiOverlay:
                 self.response_start_time = time.time()  # Keep persistently open while processing
             else:
                 words = len(self.response_text.split())
-                read_duration = max(8.0, min(28.0, 4.5 + words * 0.35))
+                read_duration = max(4.0, min(14.0, 2.0 + words * 0.16))
+                self._current_read_duration = read_duration
                 mx, my = pygame.mouse.get_pos()
                 is_hovering = resp_card_rect.collidepoint(mx, my)
                 if is_hovering:
                     self.last_response_hover_time = time.time()
-                hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 4.0
+                hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 2.0
                 if (not is_hovering and not hover_cushion) and (time.time() - self.response_start_time > read_duration):
                     self.dismiss_response()
 

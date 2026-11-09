@@ -2118,7 +2118,7 @@ def open_new_tab(url: str = "") -> str:
                 f"Opened a new tab in your browser for '{clean_q}'.\n\n"
                 f"Live Web & Search Findings for '{clean_q}':\n"
                 f"{live_summary}\n\n"
-                f"[INSTRUCTION: Summarize the key findings, top places, or recommendations aloud to the user right now in Twilight's natural voice! Mention the top 2-3 specific spots or facts found so the user hears the answer directly while viewing the tab.]"
+                f"[INSTRUCTION: Summarize the key findings, top places, or numbers aloud to the user right now in Twilight's sharp, concise voice (25 to 45 words)! State the concrete facts and highlights directly without rambling, so the user hears the answer immediately while viewing the tab.]"
             )
 
         return f"Opened a new browser tab and navigated to '{dest_url}'."

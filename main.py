@@ -67,6 +67,12 @@ def main():
     def on_user_submit(user_prompt: str):
         state_tracker["last_speech_time"] = time.time()
         print(f"User query received: {user_prompt}")
+        ov = overlay_ref[0]
+        if ov:
+            ov.response_query = user_prompt
+            ov.show_response = False
+            ov.is_processing = True
+            ov.set_state("thinking", "Formulating a reply...", query=user_prompt)
         
         # Intercept "settings" command to launch the settings popup window
         clean_prompt = user_prompt.strip().lower()
@@ -87,20 +93,19 @@ def main():
             overlay = overlay_ref[0]
             if overlay:
                 overlay.is_processing = True
-                overlay.set_state("thinking", "Formulating a reply...")
+                overlay.response_query = user_prompt
+                overlay.show_response = False
+                overlay.set_state("thinking", "Formulating a reply...", query=user_prompt)
 
             def on_status_trailer(trailer_text: str):
                 if overlay:
                     overlay.show_response_card(trailer_text, user_query=user_prompt)
-                    overlay.set_state("thinking")
+                    overlay.set_state("thinking", query=user_prompt)
                 audio.speak(trailer_text)
 
             response_text = brain.query(user_prompt, status_callback=on_status_trailer)
             active_m = getattr(brain, "last_used_model", getattr(brain.config, "model", "default"))
             print(f"[Twilight ({active_m})]: {response_text}")
-
-            lower_resp = response_text.lower()
-            is_music = any(w in lower_resp for w in ("spotify", "playlist", "track", "album", "song"))
 
             # Stop any lingering status trailer speech so the main response callbacks never get stuck
             audio.stop()
@@ -117,11 +122,10 @@ def main():
             def on_done():
                 if overlay:
                     overlay.is_processing = False
-                    overlay.response_start_time = time.time()
-                    if is_music and not any(w in lower_resp for w in ("paused", "stopped")):
-                        overlay.set_state("music", emotion="music")
-                    elif not overlay.show_response:
-                        overlay.restore_ambient_state()
+                    # Allow a concise 3.2s reading window after speech completes
+                    dur = getattr(overlay, "_current_read_duration", 5.0)
+                    overlay.response_start_time = time.time() - max(0.0, dur - 3.2)
+                    overlay.restore_ambient_state()
 
             # Fallback timer: ensure card displays within 6.5s if cloud TTS has a network delay
             fallback_timer = threading.Timer(6.5, show_card_sync)
@@ -168,6 +172,8 @@ def main():
         if ov:
             ov.voice_state = "idle"
             ov.show_input = False
+            ov.response_query = recognized_text
+            ov.show_response = False
         on_user_submit(recognized_text)
 
     def on_voice_error(err_msg):
