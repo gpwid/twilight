@@ -1036,13 +1036,21 @@ class SciTwiOverlay:
         # Auto-close speech bubble after reading duration (scaled by length, pause while hovering/scrolling)
         if self.show_response:
             words = len(self.response_text.split())
-            read_duration = max(4.0, min(14.0, 2.0 + words * 0.16))
+            read_duration = max(3.5, min(12.0, 1.8 + words * 0.14))
             self._current_read_duration = read_duration
-            mx, my = pygame.mouse.get_pos()
-            is_hovering = resp_card_rect.collidepoint(mx, my)
+
+            # Use real Windows cursor position to prevent stale Pygame cursor coordinates from freezing the timer
+            try:
+                gx, gy = win32api.GetCursorPos()
+                mx = gx - self.win_x
+                my = gy - self.win_y
+                is_hovering = resp_card_rect.collidepoint(mx, my)
+            except Exception:
+                is_hovering = False
+
             if is_hovering:
                 self.last_response_hover_time = time.time()
-            hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 2.0
+            hover_cushion = time.time() - getattr(self, "last_response_hover_time", 0.0) < 1.2
 
             # Never count down or close while Twilight is actively speaking through TTS
             is_speaking = bool(getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn())
@@ -1052,15 +1060,16 @@ class SciTwiOverlay:
             time_open = time.time() - self.response_start_time
 
             if getattr(self, "is_trailer", False):
-                # Safety cap: auto-dismiss trailer bubble after 15s if background tool hangs
-                if time_open > 15.0:
+                # Auto-dismiss trailer bubble after 6s
+                if time_open > 6.0:
                     self.dismiss_response()
             else:
-                # Normal dialogue bubble dismissal: close only after speech finishes, reading duration elapsed, and user is not hovering
-                if not is_speaking and (not is_hovering and not hover_cushion) and (time_open > read_duration):
-                    self.dismiss_response()
-                elif not is_speaking and not is_hovering and (time_open > read_duration + 8.0):
-                    # Hard safety ceiling: always close after read_duration + 8s if user isn't actively hovering
+                # Normal dialogue bubble dismissal: close after speech finishes, reading duration elapsed, and user is not hovering.
+                # Hard ceiling: always auto-dismiss after read_duration + 3.0s regardless of hover
+                if not is_speaking and (
+                    ((not is_hovering and not hover_cushion) and (time_open > read_duration))
+                    or (time_open > read_duration + 3.0)
+                ):
                     self.dismiss_response()
 
         # Safety: if user released mouse button anywhere in Windows while dragging, release drag

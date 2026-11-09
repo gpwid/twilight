@@ -127,6 +127,10 @@ class WakeWordDetector:
     def _is_suppressed(self) -> bool:
         """Check if wake word detection should be temporarily paused to prevent acoustic loops."""
         now = time.time()
+        # Suppress if Twilight is actively speaking (plus cooldown to prevent speaker audio feedback)
+        if self.is_speaking_fn and self.is_speaking_fn():
+            self.last_suppressed_time = now
+            return True
         # Suppress if voice input manager is listening/recording/transcribing
         if self.is_voice_active_fn and self.is_voice_active_fn():
             self.last_suppressed_time = now
@@ -135,8 +139,8 @@ class WakeWordDetector:
         if self.is_processing_fn and self.is_processing_fn():
             self.last_suppressed_time = now
             return True
-        # Post-suppression acoustic cooldown (1.0s to clear room echo and driver buffers)
-        if now - self.last_suppressed_time < 1.0:
+        # Post-suppression acoustic cooldown (1.2s to clear room echo and driver buffers)
+        if now - self.last_suppressed_time < 1.2:
             return True
         # Minimum debounce interval between wake events (1.5s)
         if now - self.last_wake_time < 1.5:
@@ -181,16 +185,18 @@ class WakeWordDetector:
                         if not data or len(data) == 0:
                             continue
 
+                        # Audio energy gate: discard quiet background noise/faint room sound
+                        import numpy as np
+                        audio_arr = np.frombuffer(data, dtype=np.int16)
+                        rms = float(np.sqrt(np.mean(audio_arr.astype(np.float32) ** 2)))
+                        if rms < 320.0:
+                            continue
+
                         matched = False
                         if self.recognizer.AcceptWaveform(bytes(data)):
                             res = json.loads(self.recognizer.Result())
                             text = res.get("text", "").strip().lower()
                             if self._match_wake_word(text):
-                                matched = True
-                        else:
-                            partial = json.loads(self.recognizer.PartialResult())
-                            p_text = partial.get("partial", "").strip().lower()
-                            if self._match_wake_word(p_text):
                                 matched = True
 
                         if matched:
@@ -215,14 +221,11 @@ class WakeWordDetector:
         if not detected_text:
             return False
 
-        targets = list(self.wake_words)
-        # If Twilight is actively speaking, also allow quick voice interruption keywords
-        if self.is_speaking_fn and self.is_speaking_fn():
-            targets += ["stop", "wait", "hold on", "quiet", "nevermind"]
-
-        for target in targets:
-            if target in detected_text:
-                print(f"[WakeWord] Detected wake/interrupt phrase: '{target}' in '{detected_text}'")
+        # Match strict whole-word boundaries so random substrings or phonetic fragments never false-trigger
+        for target in self.wake_words:
+            pattern = rf"\b{re.escape(target)}\b"
+            if re.search(pattern, detected_text):
+                print(f"[WakeWord] Detected wake phrase: '{target}' in '{detected_text}'")
                 if self.recognizer:
                     self.recognizer.Reset()
                 if self.on_wake:

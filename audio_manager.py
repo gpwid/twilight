@@ -69,11 +69,7 @@ def split_into_speech_chunks(text: str) -> list[str]:
     for s in raw:
         if not curr:
             curr = s
-            # Ultra-fast time-to-first-voice: emit first complete sentence immediately
-            if not chunks and len(curr) >= 20:
-                chunks.append(curr)
-                curr = ""
-        elif len(curr) + len(s) + 1 <= 140:
+        elif len(curr) + len(s) + 1 <= 180:
             curr += " " + s
         else:
             chunks.append(curr)

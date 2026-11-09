@@ -69,7 +69,7 @@ class FishAudioClient:
         payload = {
             "text": text.strip(),
             "format": "wav",
-            "temperature": 0.70,
+            "temperature": 0.28,
             "top_p": 0.70,
             "normalize": True,
         }
