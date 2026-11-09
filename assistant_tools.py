@@ -131,11 +131,11 @@ def sanitize_app_name(raw_name: str) -> str:
     }
     return alias_map.get(clean, clean)
 
-def sanitize_music_query(raw_query: str) -> tuple[str, bool, str]:
-    """Clean music search queries, extract timestamps, and determine if playlist is requested."""
+def sanitize_music_query(raw_query: str) -> tuple[str, bool, str, str, bool]:
+    """Clean music search queries, extract timestamps, playlist intent, playlist type (user/public/any), and random flag."""
     clean = (raw_query or "").strip()
     if not clean:
-        return "", False, ""
+        return "", False, "", "any", False
 
     ts = ""
     ts_match = re.search(r'\b(?:at|from)\s+(\d+:\d+|\d+\s*(?:m|min|s|sec|seconds?))\b', clean, re.IGNORECASE)
@@ -143,7 +143,11 @@ def sanitize_music_query(raw_query: str) -> tuple[str, bool, str]:
         ts = ts_match.group(1)
         clean = clean[:ts_match.start()] + clean[ts_match.end():]
 
-    is_playlist = bool(re.search(r'\bplaylists?\b', clean, re.IGNORECASE))
+    is_user_pl = bool(re.search(r'\b(?:my|our|saved|personal|my\s+library)\s+playlists?\b|\bplaylists?\s+(?:from|in)\s+my\s+library\b|\bmy\s+playlist\b', clean, re.IGNORECASE))
+    is_public_pl = bool(re.search(r'\b(?:public|other\s+people\'?s?|someone\s+else\'?s?|external|community)\s+playlists?\b|\bplaylists?\s+(?:from|on)\s+spotify\b', clean, re.IGNORECASE))
+    pl_type = "user" if is_user_pl else ("public" if is_public_pl else "any")
+    is_playlist = is_user_pl or is_public_pl or bool(re.search(r'\bplaylists?\b', clean, re.IGNORECASE))
+    is_random = bool(re.search(r'\b(?:random|any|shuffle|some|something|whatever|a\s+random\s+song|any\s+song|random\s+track)\b', clean, re.IGNORECASE))
 
     for _ in range(3):
         clean = re.sub(
@@ -152,20 +156,22 @@ def sanitize_music_query(raw_query: str) -> tuple[str, bool, str]:
             '', clean, flags=re.IGNORECASE
         ).strip()
         clean = re.sub(r'\s+playlists?$', '', clean, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'\s+albums?$', '', clean, flags=re.IGNORECASE).strip()
 
         clean = re.sub(
             r'^(?:(?:please\s+)?(?:can|could)\s+you\s+)?'
             r'(?:open\s+(?:up\s+)?spotify\s+(?:and\s+)?|spotify\s+(?:and\s+)?|'
             r'play\s+(?:up\s+)?|put\s+on\s+|listen\s+to\s+|hear\s+|shuffle\s+|load\s+|stream\s+|'
             r'switch\s+to\s+|change\s+to\s+)?'
-            r'(?:a\s+|some\s+|any\s+|the\s+|my\s+|our\s+)?'
+            r'(?:a\s+|some\s+|any\s+|the\s+|my\s+|our\s+|random\s+)?'
+            r'(?:public\s+|other\s+people\'?s?\s+|someone\s+else\'?s?\s+|personal\s+|saved\s+)?'
             r'(?:song\s+(?:by|from)|songs\s+(?:by|from)|music\s+(?:by|from)|track\s+(?:by|from)|'
-            r'songs?|tracks?|music|playlist\s+called|playlist\s+named|playlist)?\s*',
+            r'songs?|tracks?|music|playlist\s+called|playlist\s+named|playlist|album\s+called|album\s+named|album)?\s*',
             '', clean, flags=re.IGNORECASE
         ).strip()
 
     clean = re.sub(r'\s+', ' ', clean).strip()
-    return clean, is_playlist, ts
+    return clean, is_playlist, ts, pl_type, is_random
 
 def fetch_live_web_search(query: str) -> str:
     """Fetch live news, election returns, current events, and encyclopedic background for any query."""
@@ -830,10 +836,16 @@ def get_playlist_details(playlist_uri: str) -> dict:
 def ensure_spotify_running():
     """Ensure Spotify desktop client is launched, rendered, and ready."""
     exe = os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe")
+    cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
     if not is_process_running("Spotify.exe"):
         print("[Tools] Starting Spotify desktop client...")
         if os.path.exists(exe):
-            os.startfile(exe)
+            try:
+                subprocess.Popen([exe], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            except Exception:
+                os.startfile(exe)
+        elif os.path.exists(cli):
+            subprocess.run([cli, "open"], capture_output=True, timeout=2.0)
         else:
             try:
                 os.startfile("spotify:")
@@ -845,36 +857,127 @@ def ensure_spotify_running():
         except Exception:
             time.sleep(2.0)
 
+def get_random_artist_track(artist_name: str) -> tuple[dict, str, str] | None:
+    """Find a random track across an artist's full album discography on Spotify."""
+    cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+    if not os.path.exists(cli):
+        return None
+    no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        res = subprocess.run(
+            [cli, "search", artist_name, "--type", "album", "--format", "json", "--limit", "25"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return None
+        data = json.loads(res.stdout)
+        albums = data.get("albums", [])
+        if not albums:
+            return None
+        matching_albums = []
+        for alb in albums:
+            alb_artists = [a.lower() for a in alb.get("artists", [])]
+            if any(artist_name.lower() in a for a in alb_artists) or not alb_artists:
+                matching_albums.append(alb)
+        if not matching_albums:
+            matching_albums = albums
+
+        chosen_album = random.choice(matching_albums)
+        alb_name = chosen_album.get("name", "")
+
+        # Search tracks with album and artist filters
+        search_q = f"album:{alb_name} artist:{artist_name}"
+        res_tr = subprocess.run(
+            [cli, "search", search_q, "--type", "track", "--format", "json", "--limit", "30"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win
+        )
+        tracks = []
+        if res_tr.returncode == 0 and res_tr.stdout.strip():
+            data_tr = json.loads(res_tr.stdout)
+            tracks = data_tr.get("tracks", [])
+
+        if not tracks:
+            res_tr2 = subprocess.run(
+                [cli, "search", f"{alb_name} {artist_name}", "--type", "track", "--format", "json", "--limit", "25"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win
+            )
+            if res_tr2.returncode == 0 and res_tr2.stdout.strip():
+                data_tr2 = json.loads(res_tr2.stdout)
+                raw_tracks = data_tr2.get("tracks", [])
+                tracks = [t for t in raw_tracks if any(artist_name.lower() in a.lower() for a in t.get("artists", []))] or raw_tracks
+
+        if tracks:
+            chosen_track = random.choice(tracks)
+            return chosen_track, alb_name, artist_name
+    except Exception as e:
+        print(f"[Tools] get_random_artist_track note: {e}")
+    return None
+
+def get_random_album_track(album_query: str) -> tuple[dict, str, str] | None:
+    """Find a random track from a specific album on Spotify."""
+    cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+    if not os.path.exists(cli):
+        return None
+    no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        res_alb = subprocess.run(
+            [cli, "search", album_query, "--type", "album", "--format", "json", "--limit", "3"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win
+        )
+        if res_alb.returncode != 0 or not res_alb.stdout.strip():
+            return None
+        data = json.loads(res_alb.stdout)
+        albums = data.get("albums", [])
+        if not albums:
+            return None
+        chosen_alb = albums[0]
+        alb_name = chosen_alb.get("name", "")
+        alb_artist = ", ".join(chosen_alb.get("artists", []))
+
+        search_q = f"album:{alb_name} artist:{alb_artist}" if alb_artist else f"album:{alb_name}"
+        res_tr = subprocess.run(
+            [cli, "search", search_q, "--type", "track", "--format", "json", "--limit", "30"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win
+        )
+        tracks = []
+        if res_tr.returncode == 0 and res_tr.stdout.strip():
+            tr_data = json.loads(res_tr.stdout)
+            tracks = tr_data.get("tracks", [])
+
+        if not tracks:
+            res_tr2 = subprocess.run(
+                [cli, "search", f"{alb_name} {alb_artist}", "--type", "track", "--format", "json", "--limit", "30"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win
+            )
+            if res_tr2.returncode == 0 and res_tr2.stdout.strip():
+                tr_data2 = json.loads(res_tr2.stdout)
+                tracks = tr_data2.get("tracks", [])
+
+        if tracks:
+            picked = random.choice(tracks)
+            return picked, alb_name, alb_artist
+    except Exception as e:
+        print(f"[Tools] get_random_album_track note: {e}")
+    return None
+
 def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> str:
     """Search and play a song, artist, album, or track on Spotify."""
     mark_action_tool_executed()
     try:
         no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        clean, is_pl_intent, extracted_ts = sanitize_music_query(query)
+        clean, is_pl_intent, extracted_ts, pl_type, query_is_random = sanitize_music_query(query)
         if extracted_ts and not timestamp:
             timestamp = extracted_ts
+        if query_is_random:
+            is_random = True
 
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
         ensure_spotify_running()
 
         if is_pl_intent:
-            return play_playlist(clean)
-
-        # Detect if user is asking for an artist generally ("play kendrick lamar", "play a song from kendrick lamar")
-        is_artist_request = bool(re.search(
-            r'\b(?:random|shuffle|any|some|a\s+song\s+(?:by|from)|songs?\s+(?:by|from)|music\s+(?:by|from)|something\s+(?:by|from))\b',
-            query, re.IGNORECASE
-        ))
-        if is_artist_request:
-            is_random = True
+            return play_playlist(clean, playlist_type=pl_type)
 
         wants_alt = bool(re.search(r'\b(?:other|different|another|alternative|alternate|original|live|acoustic|remix|not this|switch|change)\b', query, re.IGNORECASE))
-
-        # Check if clean is a user playlist name
-        if clean:
-            pl_uri, pl_name = find_user_playlist(clean)
-            if pl_uri:
-                return play_playlist(pl_name)
 
         if not os.path.exists(cli):
             encoded = urllib.parse.quote(clean or "music")
@@ -883,7 +986,6 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
 
         # If user asked for generic music ("play some music", "play something"), pick from library or top tracks
         if not clean or clean.lower() in ("play", "resume", "unpause", "music", "song", "a song", "some music", "something"):
-            # Check if Spotify is already paused with a track loaded
             try:
                 np = subprocess.run([cli, "now-playing", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
                 if np.returncode == 0 and np.stdout.strip():
@@ -893,20 +995,72 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
                         return control_spotify("resume")
             except Exception:
                 pass
-            # If nothing loaded, pick a random playlist from user library
             return play_playlist("")
 
         try:
-            # Check if `clean` is an artist name (e.g. "kendrick lamar", "clairo")
-            res_art = subprocess.run([cli, "search", clean, "--type", "artist", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+            # 1. Check if clean matches top album or top artist on Spotify
+            is_album_in_query = bool(re.search(r'\balbums?\b|\btrack\s+from\b|\bsong\s+from\b', query, re.IGNORECASE))
+
+            top_art = None
+            res_art = subprocess.run([cli, "search", clean, "--type", "artist", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5, creationflags=no_win)
             if res_art.returncode == 0 and res_art.stdout.strip():
                 try:
-                    art_data = json.loads(res_art.stdout)
-                    artists = art_data.get("artists", [])
-                    if artists and artists[0].get("name", "").lower() == clean.lower():
-                        is_random = True
+                    arts = json.loads(res_art.stdout).get("artists", [])
+                    if arts and arts[0].get("name", "").lower() == clean.lower():
+                        top_art = arts[0]["name"]
                 except Exception:
                     pass
+
+            top_alb = None
+            res_alb = subprocess.run([cli, "search", clean, "--type", "album", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5, creationflags=no_win)
+            if res_alb.returncode == 0 and res_alb.stdout.strip():
+                try:
+                    albs = json.loads(res_alb.stdout).get("albums", [])
+                    if albs and albs[0].get("name", "").lower() == clean.lower():
+                        top_alb = albs[0]
+                except Exception:
+                    pass
+
+            # If user explicitly asked for album, or top album matched without artist match:
+            if top_alb and (is_album_in_query or not top_art):
+                alb_title = top_alb.get("name", clean)
+                alb_artists = ", ".join(top_alb.get("artists", []))
+                if is_random:
+                    rand_alb = get_random_album_track(alb_title)
+                    if rand_alb:
+                        chosen_track, a_name, a_artist = rand_alb
+                        t_uri = chosen_track.get("uri")
+                        t_name = chosen_track.get("name")
+                        if t_uri:
+                            print(f"[Tools] Playing random album track: '{t_name}' ({t_uri}) from '{a_name}' by {a_artist}")
+                            subprocess.run([cli, "play", t_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+                            subprocess.run([cli, "navigate", t_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
+                            return f"Playing random track '{t_name}' from the album '{a_name}' by {a_artist} on Spotify!"
+                else:
+                    alb_uri = top_alb.get("uri")
+                    if alb_uri:
+                        subprocess.run([cli, "play", alb_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+                        subprocess.run([cli, "navigate", alb_uri], capture_output=True, timeout=1.5, creationflags=no_win)
+                        return f"Playing album '{alb_title}' by {alb_artists} on Spotify!"
+
+            # If artist matched:
+            if top_art and (is_random or " by " not in clean.lower()):
+                rand_res = get_random_artist_track(top_art)
+                if rand_res:
+                    chosen_track, alb_name, art_name = rand_res
+                    t_uri = chosen_track.get("uri")
+                    t_name = chosen_track.get("name")
+                    if t_uri:
+                        print(f"[Tools] Playing random artist track: '{t_name}' ({t_uri}) from '{alb_name}' by {art_name}")
+                        subprocess.run([cli, "play", t_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+                        subprocess.run([cli, "navigate", t_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
+                        return f"Playing random track '{t_name}' by {art_name} from the album '{alb_name}' on Spotify!"
+
+            # 2. Check if clean matches a user playlist (now that we verified it's not an artist or album)
+            if clean:
+                pl_uri, pl_name = find_user_playlist(clean)
+                if pl_uri:
+                    return play_playlist(pl_name, playlist_type="user")
 
             search_q = f"artist:{clean}" if is_random and " by " not in clean.lower() else clean
             res = subprocess.run([cli, "search", search_q, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
@@ -1127,11 +1281,14 @@ def find_user_playlist(playlist_name: str) -> tuple[str | None, str | None]:
         print(f"[Tools] find_user_playlist note: {e}")
     return None, None
 
-def play_playlist(name: str = "") -> str:
+def play_playlist(name: str = "", playlist_type: str = "any") -> str:
     """Play a playlist on Spotify from user library or Spotify's catalog."""
     mark_action_tool_executed()
     try:
-        clean, _, _ = sanitize_music_query(name)
+        clean, _, _, detected_type, _ = sanitize_music_query(name)
+        if playlist_type == "any" and detected_type != "any":
+            playlist_type = detected_type
+
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
         ensure_spotify_running()
         no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -1141,8 +1298,21 @@ def play_playlist(name: str = "") -> str:
             os.startfile(f"spotify:search:{encoded}")
             return f"Opened Spotify to search for '{clean}'."
 
-        # 1. If no playlist name given, or "my playlist" / "some playlist", play random from user library
+        # 1. If no playlist name given, or "my playlist" / "some playlist"
         if not clean or clean in ("playlist", "my playlist", "a playlist", "playlists", "music"):
+            if playlist_type == "public":
+                res_pub = subprocess.run([cli, "search", "top hits", "--type", "playlist", "--format", "json", "--limit", "5"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5, creationflags=no_win)
+                if res_pub.returncode == 0 and res_pub.stdout.strip():
+                    data = json.loads(res_pub.stdout)
+                    pls = data.get("playlists", [])
+                    if pls:
+                        chosen = random.choice(pls)
+                        t_uri = chosen.get("uri")
+                        t_name = chosen.get("name")
+                        author = chosen.get("author", "Spotify")
+                        subprocess.run([cli, "play", t_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+                        subprocess.run([cli, "navigate", t_uri], capture_output=True, timeout=1.5, creationflags=no_win)
+                        return f"Playing public playlist '{t_name}' by {author} on Spotify (not saved to your library)!"
             try:
                 res = subprocess.run([cli, "library", "list", "--type", "playlist", "--format", "json", "--limit", "50"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5, creationflags=no_win)
                 if res.returncode == 0 and res.stdout.strip():
@@ -1158,7 +1328,39 @@ def play_playlist(name: str = "") -> str:
             except Exception as e:
                 print(f"[Tools] Random user playlist error: {e}")
 
-        # 2. Check user's saved library playlists first
+        # 2. If playlist_type is explicitly 'user' (e.g. "my playlist all-nighter")
+        if playlist_type == "user":
+            user_uri, user_name = find_user_playlist(clean)
+            if user_uri:
+                subprocess.run([cli, "play", user_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+                subprocess.run([cli, "navigate", user_uri], capture_output=True, timeout=1.5, creationflags=no_win)
+                details = get_playlist_details(user_uri)
+                desc_str = f" (Description: \"{details['description']}\")" if details.get("description") else ""
+                tracks_str = f" — Featuring tracks: {', '.join(details['sample_tracks'][:3])}" if details.get("sample_tracks") else ""
+                return f"Playing your playlist '{user_name or clean}'{desc_str}{tracks_str} on Spotify!"
+            return f"I couldn't find a playlist named '{clean}' in your saved Spotify library."
+
+        # 3. If playlist_type is explicitly 'public' (e.g. "play public playlist lofi beats", "other people's playlist")
+        if playlist_type == "public":
+            try:
+                res = subprocess.run([cli, "search", clean, "--type", "playlist", "--format", "json", "--limit", "10"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    pls = data.get("playlists", [])
+                    if pls:
+                        chosen_pl = pls[0]
+                        target_uri = chosen_pl.get("uri", "")
+                        target_title = chosen_pl.get("name", clean)
+                        author = chosen_pl.get("author", "Spotify")
+                        if target_uri:
+                            subprocess.run([cli, "play", target_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+                            subprocess.run([cli, "navigate", target_uri], capture_output=True, timeout=1.5, creationflags=no_win)
+                            return f"Playing public playlist '{target_title}' by {author} on Spotify (not saved to your library)!"
+            except Exception as se:
+                print(f"[Tools] Spotify public playlist search note: {se}")
+            return f"I couldn't find a public playlist matching '{clean}' on Spotify."
+
+        # 4. playlist_type is 'any': Check user library first, then fall back to public catalog
         user_uri, user_name = find_user_playlist(clean)
         if user_uri:
             subprocess.run([cli, "play", user_uri], capture_output=True, timeout=2.0, creationflags=no_win)
@@ -1166,9 +1368,8 @@ def play_playlist(name: str = "") -> str:
             details = get_playlist_details(user_uri)
             desc_str = f" (Description: \"{details['description']}\")" if details.get("description") else ""
             tracks_str = f" — Featuring tracks: {', '.join(details['sample_tracks'][:3])}" if details.get("sample_tracks") else ""
-            return f"Playing user playlist '{user_name or clean}'{desc_str}{tracks_str} on Spotify!"
+            return f"Playing your playlist '{user_name or clean}'{desc_str}{tracks_str} on Spotify!"
 
-        # 3. If not in user library, search Spotify's catalog for public playlists!
         try:
             res = subprocess.run([cli, "search", clean, "--type", "playlist", "--format", "json", "--limit", "10"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
             if res.returncode == 0 and res.stdout.strip():
@@ -1186,7 +1387,6 @@ def play_playlist(name: str = "") -> str:
         except Exception as se:
             print(f"[Tools] Spotify catalog playlist search note: {se}")
 
-        # 4. Fallback: Search tracks or albums matching this name
         return play_spotify(clean, is_random=True)
     except Exception as e:
         print(f"[Tools] play_playlist error: {e}")

@@ -229,13 +229,13 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "play_spotify",
-            "description": "Play a track, album, artist, or music genre on Spotify. Supports custom start timestamps and random/shuffle mode.",
+            "description": "Play a track, album, artist, or music genre on Spotify. Set is_random=true to pick a random track from an artist's discography or an album.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Track, album, artist, or music genre"},
                     "timestamp": {"type": "string", "description": "Optional start timestamp e.g. 1:30"},
-                    "is_random": {"type": "boolean", "description": "Whether to shuffle"}
+                    "is_random": {"type": "boolean", "description": "Whether to pick a random track from the artist or album"}
                 },
                 "required": ["query"]
             }
@@ -245,11 +245,12 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "play_playlist",
-            "description": "Play a playlist on Spotify by name (searches both user's library and Spotify's catalog).",
+            "description": "Play a playlist on Spotify. Can target the user's saved library ('user') or Spotify's public catalog ('public') without saving.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Playlist name (e.g. 'all-nighter', 'lofi', 'study')"}
+                    "name": {"type": "string", "description": "Playlist name (e.g. 'all-nighter', 'lofi beats', 'study')"},
+                    "playlist_type": {"type": "string", "enum": ["user", "public", "any"], "description": "Target 'user' for user library playlist only, 'public' for public catalog without saving, or 'any'"}
                 },
                 "required": ["name"]
             }
@@ -1236,17 +1237,25 @@ class SciTwiBrain:
                     m = re.search(r'\b(?:play|put on|listen to)\s+(?:up\s+)?(?:spotify\s+and\s+)?(?:some\s+)?(.+?)(?:\s+for\s+me|\s+on\s+spotify)?$', user_q, re.IGNORECASE)
                     if m:
                         q = m.group(1).strip()
+                is_rand = args.get("is_random", False)
+                if not is_rand:
+                    user_q = get_current_user_query()
+                    if re.search(r'\b(?:random|any|shuffle|some|something|whatever)\b', user_q, re.IGNORECASE):
+                        is_rand = True
                 res = play_spotify(
                     query=q,
                     timestamp=args.get("timestamp", ""),
-                    is_random=args.get("is_random", False)
+                    is_random=is_rand
                 )
             elif name == "control_spotify":
                 res = control_spotify(args.get("action", ""))
             elif name == "seek_spotify":
                 res = seek_spotify(args.get("timestamp", ""))
             elif name == "play_playlist":
-                res = play_playlist(args.get("name", ""))
+                res = play_playlist(
+                    name=args.get("name", ""),
+                    playlist_type=args.get("playlist_type", "any")
+                )
             elif name == "play_youtube":
                 res = play_youtube(
                     query=args.get("query", ""),
