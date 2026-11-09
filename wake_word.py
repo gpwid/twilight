@@ -80,7 +80,7 @@ class WakeWordDetector:
     def _update_grammar(self):
         if not self.model:
             return
-        interrupt_phrases = ["stop", "wait", "hold on", "quiet", "nevermind"]
+        interrupt_phrases = ["hoy", "whoa", "wait", "hold on", "stop", "quiet", "pause", "shh", "nevermind"]
         grammar = list(self.wake_words) + interrupt_phrases + ["[unk]"]
         self.recognizer = KaldiRecognizer(self.model, 16000, json.dumps(grammar))
 
@@ -127,10 +127,6 @@ class WakeWordDetector:
     def _is_suppressed(self) -> bool:
         """Check if wake word detection should be temporarily paused to prevent acoustic loops."""
         now = time.time()
-        # Suppress if Twilight is actively speaking (plus cooldown to prevent speaker audio feedback)
-        if self.is_speaking_fn and self.is_speaking_fn():
-            self.last_suppressed_time = now
-            return True
         # Suppress if voice input manager is listening/recording/transcribing
         if self.is_voice_active_fn and self.is_voice_active_fn():
             self.last_suppressed_time = now
@@ -138,9 +134,6 @@ class WakeWordDetector:
         # Suppress if brain is actively formulating a reply
         if self.is_processing_fn and self.is_processing_fn():
             self.last_suppressed_time = now
-            return True
-        # Post-suppression acoustic cooldown (1.2s to clear room echo and driver buffers)
-        if now - self.last_suppressed_time < 1.2:
             return True
         # Minimum debounce interval between wake events (1.5s)
         if now - self.last_wake_time < 1.5:
@@ -185,18 +178,29 @@ class WakeWordDetector:
                         if not data or len(data) == 0:
                             continue
 
-                        # Audio energy gate: discard quiet background noise/faint room sound
+                        # Audio energy gate calculation
                         import numpy as np
                         audio_arr = np.frombuffer(data, dtype=np.int16)
                         rms = float(np.sqrt(np.mean(audio_arr.astype(np.float32) ** 2)))
-                        if rms < 320.0:
+
+                        is_tts_speaking = bool(self.is_speaking_fn and self.is_speaking_fn())
+
+                        # When Twilight is speaking through speakers, speaker bleed into the mic is quiet to moderate (~150-450 RMS).
+                        # Near-field voice interruption (calling out "HOY!", "WAIT!", "STOP!", "TWILIGHT!") directly into the mic
+                        # produces much higher energy (RMS >= 720).
+                        # We drop low-energy audio while speaking to completely eliminate speaker feedback loops!
+                        if is_tts_speaking and rms < 720.0:
+                            continue
+
+                        # Normal ambient energy gate when idle: ignore quiet room breathing/mouse clicks (<320)
+                        if not is_tts_speaking and rms < 320.0:
                             continue
 
                         matched = False
                         if self.recognizer.AcceptWaveform(bytes(data)):
                             res = json.loads(self.recognizer.Result())
                             text = res.get("text", "").strip().lower()
-                            if self._match_wake_word(text):
+                            if self._match_wake_word(text, is_speaking=is_tts_speaking):
                                 matched = True
 
                         if matched:
@@ -217,15 +221,20 @@ class WakeWordDetector:
                 # Silently back off on device busy / disconnection
                 time.sleep(0.5)
 
-    def _match_wake_word(self, detected_text: str) -> bool:
+    def _match_wake_word(self, detected_text: str, is_speaking: bool = False) -> bool:
         if not detected_text:
             return False
 
+        targets = list(self.wake_words)
+        # If Twilight is actively speaking, allow wacky conversational halt interjections to interrupt her
+        if is_speaking:
+            targets += ["hoy", "whoa", "wait", "hold on", "stop", "quiet", "pause", "shh", "nevermind"]
+
         # Match strict whole-word boundaries so random substrings or phonetic fragments never false-trigger
-        for target in self.wake_words:
+        for target in targets:
             pattern = rf"\b{re.escape(target)}\b"
             if re.search(pattern, detected_text):
-                print(f"[WakeWord] Detected wake phrase: '{target}' in '{detected_text}'")
+                print(f"[WakeWord] Detected wake/interrupt phrase: '{target}' in '{detected_text}'")
                 if self.recognizer:
                     self.recognizer.Reset()
                 if self.on_wake:

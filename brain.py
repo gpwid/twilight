@@ -82,6 +82,7 @@ Your dialogue must sound like an authentic human teenager hanging out in person,
 4. Real-world Grounding & Information Summaries: When looking up or summarizing information, news, current events, web searches, election results, or reading live screen content, be crisp, direct, and accurate (25 to 50 words). State the concrete numbers, key winners, places, or facts in your very first sentence. Never invent or hallucinate inside jokes, acronyms, or references to yourself or your fictional world where none exist. Only react to Equestria Girls, character lore, or personal easter eggs if the user explicitly brings them up or literally opens artwork of them.
 5. Music & Lyrics: Talk like you are sharing an earbud with a friend on the couch. When the user types song lyrics or stretched-out singing vowels, recognize they are singing along and vibe with them rather than taking breakup lyrics literally.
 6. TTS constraints: Never start with "Ooh,". Never use asterisks or bracketed action tags (*giggles*, [sighs]). Never write out literal laughter words ("haha", "hehe", "lol").
+7. Dismissals & Conversational Stand-Downs: If the user changes their mind, says nevermind, cancels, or dismisses you in any casual or wacky way (e.g. "hapapapap wait never mind", "hoy forget that", "scratch that Twilight", "nah leave it", "don't bother"), immediately stand down warmly with [emotion: happy] or [emotion: idle] in one short sentence without executing previous commands (e.g., "[emotion: happy] Got it, standing down! Let me know if you need anything.").
 
 CORE RULES & EMOTION TAGS:
 - Direct answers: When asked factual, news, current events, or informational questions, state the actual answer, names, numbers, or facts in your very first sentence. Use [emotion: reading] or [emotion: analyzing] for informational summaries. Never use [emotion: music] unless music is actively playing.
@@ -682,9 +683,15 @@ class SciTwiBrain:
             self.last_action_kwargs = kwargs
             return fn(*args, **kwargs)
 
-        # 0. Instant Nevermind / Cancellation Fast-Path
-        if re.search(r'^\s*(?:nevermind|never\s+mind|cancel(?:\s+that)?|forget\s+it|nvm|dismiss|scratch\s+that|don\'?t\s+worry(?:\s+about\s+it)?)\s*$', user_lower) or re.search(r'\b(?:nevermind|never\s+mind)\b', user_lower):
-            return "[emotion: happy] Got it, never mind! Let me know if you need anything else."
+        # 0. Instant Nevermind / Cancellation Fast-Path (covers any natural or wacky conversational phrasing)
+        cancellation_pattern = (
+            r'\b(?:never\s*mind|forget\s*(?:about\s*)?(?:it|that|this)|scratch\s*that|'
+            r'cancel(?:\s*(?:that|it|this))?|don\'?t\s*bother|changed?\s*my\s*mind|'
+            r'leave\s*it|nah\s*(?:wait|nevermind|forget|i\'?m\s*good)|nvm|dismiss|'
+            r'don\'?t\s*worry(?:\s*about\s*it)?|stand\s*down|drop\s*it)\b'
+        )
+        if re.search(cancellation_pattern, user_lower):
+            return "[emotion: happy] Got it, standing down! Let me know if you need anything."
 
         # 1. Repeat action guarantee ("again", "do it again", "once more", "repeat")
         if re.match(r'^(?:again|do\s+it\s+again|once\s+more|repeat|one\s+more\s+time|back\s+again)\b', user_lower):

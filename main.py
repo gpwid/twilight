@@ -89,8 +89,14 @@ def main():
             ov.set_state("thinking", "Formulating a reply...", query=user_prompt)
         
         clean_prompt = user_prompt.strip().lower()
-        # Intercept "nevermind" / cancellation commands immediately
-        if re.search(r'^\s*(?:nevermind|never\s+mind|cancel(?:\s+that)?|forget\s+it|nvm|dismiss|scratch\s+that|don\'?t\s+worry(?:\s+about\s+it)?)\s*$', clean_prompt) or re.search(r'\b(?:nevermind|never\s+mind)\b', clean_prompt):
+        # Intercept conversational "nevermind" / cancellation commands immediately
+        cancellation_pattern = (
+            r'\b(?:never\s*mind|forget\s*(?:about\s*)?(?:it|that|this)|scratch\s*that|'
+            r'cancel(?:\s*(?:that|it|this))?|don\'?t\s*bother|changed?\s*my\s*mind|'
+            r'leave\s*it|nah\s*(?:wait|nevermind|forget|i\'?m\s*good)|nvm|dismiss|'
+            r'don\'?t\s*worry(?:\s*about\s*it)?|stand\s*down|drop\s*it)\b'
+        )
+        if re.search(cancellation_pattern, clean_prompt):
             ov = overlay_ref[0]
             if ov:
                 ov.show_input = False
@@ -99,10 +105,10 @@ def main():
                 ov.selection_active = False
                 ov.is_processing = False
                 ov.is_trailer = False
-                ov.show_response_card("Got it, never mind! Let me know if you need anything else.", user_query=user_prompt, emotion="happy")
+                ov.show_response_card("Got it, standing down! Let me know if you need anything.", user_query=user_prompt, emotion="happy")
                 ov.response_start_time = time.time()
                 ov._current_read_duration = 2.4
-            audio.speak("Got it, never mind!")
+            audio.speak("Got it, standing down!")
             return
 
         # Intercept "settings" command to launch the settings popup window
