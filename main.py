@@ -12,6 +12,7 @@ from brain import SciTwiBrain
 from overlay import SciTwiOverlay
 import overlay
 from voice_input import VoiceInputManager
+from wake_word import WakeWordDetector
 
 def main():
     try:
@@ -185,6 +186,21 @@ def main():
     )
     overlay.set_voice_input_manager(voice_mgr)
     print(f"[VoiceInput] Engine: {getattr(config, 'stt_engine', 'groq_whisper')} | Hotkey: {getattr(config, 'voice_input_hotkey', 'ctrl+shift+v')}")
+
+    # 7. Initialize Local Wake-Word Detector
+    def on_wake_detected(phrase: str):
+        print(f"[Twilight] Wake phrase recognized: '{phrase}'!")
+        ov = overlay_ref[0]
+        if ov:
+            ov.summon()
+        voice_mgr.start_listening()
+
+    wake_detector = WakeWordDetector(
+        config=config,
+        on_wake=on_wake_detected,
+        is_speaking_fn=audio.is_speaking,
+        is_voice_active_fn=voice_mgr.is_active,
+    )
 
     # 7. Register Global Hotkeys (Ctrl+Shift+Space summon, Ctrl+Shift+V voice, Ctrl+Shift+P perch, Ctrl+Shift+Q study)
     def setup_global_hotkeys(summon_callback, voice_callback, perch_callback, study_callback):
@@ -378,6 +394,7 @@ def main():
                             voice_mgr.silence_timeout = getattr(new_cfg, "mic_silence_timeout", 1.2)
                             voice_mgr.energy_threshold = getattr(new_cfg, "mic_energy_threshold", 400)
                             voice_mgr.stt_engine = getattr(new_cfg, "stt_engine", "groq_whisper")
+                            wake_detector.reload_config(new_cfg)
                         except Exception as e:
                             print(f"[Main] Error reloading config: {e}")
 
@@ -386,6 +403,7 @@ def main():
     except KeyboardInterrupt:
         print("\nShutdown signal received.")
     finally:
+        wake_detector.stop()
         audio.stop()
         pygame.quit()
         print("SciTwi companion shut down cleanly.")

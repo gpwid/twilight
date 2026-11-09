@@ -53,7 +53,7 @@ C_SUCCESS = (74, 222, 128)      # Confirmation green
 C_ERR = (248, 113, 113)         # Alert red
 
 WIN_W = 520
-WIN_H = 480
+WIN_H = 520
 
 def get_clipboard_text() -> str:
     """Read plain text from clipboard using pygame.scrap with win32clipboard fallback."""
@@ -181,6 +181,11 @@ class SciTwiSettingsCard:
         self.mic_silence_timeout = getattr(self.cfg, "mic_silence_timeout", 1.2)
         self.mic_test_active = False
         self.mic_test_level = 0.0
+
+        # Wake Word Settings
+        self.wake_word_enabled = getattr(self.cfg, "wake_word_enabled", True)
+        loaded_ww = getattr(self.cfg, "wake_words", None) or ["hey twi", "hey twilight", "twilight"]
+        self.wake_words_text = ", ".join(loaded_ww)
 
         # Tab navigation: 0 = Brain & Models, 1 = Voice & Audio, 2 = Shortcuts
         self.current_tab = 0
@@ -442,6 +447,10 @@ class SciTwiSettingsCard:
             self.cfg.stt_engine = self.stt_engine
             self.cfg.mic_silence_timeout = float(self.mic_silence_timeout)
 
+            self.cfg.wake_word_enabled = self.wake_word_enabled
+            raw_ww = [w.strip().lower() for w in self.wake_words_text.split(",") if w.strip()]
+            self.cfg.wake_words = raw_ww or ["hey twi", "hey twilight", "twilight"]
+
             self.cfg.save()
             self.status_msg = f"Settings saved! Primary: {primary_model}"
             self.status_col = C_SUCCESS
@@ -491,7 +500,7 @@ class SciTwiSettingsCard:
             tx += tw + 8
 
         # 4. Inset Well Container
-        well_rect = pygame.Rect(12, 74, WIN_W - 24, 346)
+        well_rect = pygame.Rect(12, 74, WIN_W - 24, 386)
         pygame.draw.rect(self.screen, C_WELL, well_rect, border_radius=8)
         pygame.draw.rect(self.screen, C_WELL_BORDER, well_rect, width=1, border_radius=8)
 
@@ -528,6 +537,8 @@ class SciTwiSettingsCard:
             return self.eleven_key
         elif self.active_input == "eleven_voice":
             return self.eleven_voice
+        elif self.active_input == "wake_words":
+            return self.wake_words_text
         return ""
 
     def _set_active_text(self, val: str):
@@ -541,6 +552,8 @@ class SciTwiSettingsCard:
             self.eleven_key = val
         elif self.active_input == "eleven_voice":
             self.eleven_voice = val
+        elif self.active_input == "wake_words":
+            self.wake_words_text = val
 
     def _render_text_input_content(self, rect: pygame.Rect, text: str, is_active: bool, is_masked: bool = False, font = None, text_color = C_TEXT):
         if font is None:
@@ -862,18 +875,18 @@ class SciTwiSettingsCard:
             self.screen.blit(off_msg, (well.x + 12, well.y + 60))
 
         # Test Voice Button
-        self.rect_test_btn = pygame.Rect(well.x + 12, well.y + 160, 150, 30)
+        self.rect_test_btn = pygame.Rect(well.x + 12, well.y + 150, 140, 26)
         pygame.draw.rect(self.screen, C_BG, self.rect_test_btn, border_radius=6)
         pygame.draw.rect(self.screen, C_CYAN, self.rect_test_btn, width=1, border_radius=6)
         t_surf = self.font_bold.render("▶ Test Voice", True, C_CYAN)
-        self.screen.blit(t_surf, (self.rect_test_btn.x + (self.rect_test_btn.width - t_surf.get_width()) // 2, self.rect_test_btn.y + 6))
+        self.screen.blit(t_surf, (self.rect_test_btn.x + (self.rect_test_btn.width - t_surf.get_width()) // 2, self.rect_test_btn.y + 4))
 
         # Divider between TTS and STT
-        pygame.draw.line(self.screen, C_WELL_BORDER, (well.x + 12, well.y + 200), (well.x + well.width - 12, well.y + 200), 1)
+        pygame.draw.line(self.screen, C_WELL_BORDER, (well.x + 12, well.y + 186), (well.x + well.width - 12, well.y + 186), 1)
 
         # Speech-to-Text (STT) Settings Section
-        lbl_stt = self.font_bold.render("Speech Recognition (STT):", True, C_STAR)
-        self.screen.blit(lbl_stt, (well.x + 12, well.y + 210))
+        lbl_stt = self.font_bold.render("Speech Recognition & Wake Word Detection:", True, C_STAR)
+        self.screen.blit(lbl_stt, (well.x + 12, well.y + 196))
 
         stt_opts = [
             ("groq_whisper", "Groq Whisper (~200ms)", 180),
@@ -882,7 +895,7 @@ class SciTwiSettingsCard:
         self.stt_rects = {}
         sx = well.x + 12
         for sid, sname, sw in stt_opts:
-            sr = pygame.Rect(sx, well.y + 236, sw, 26)
+            sr = pygame.Rect(sx, well.y + 220, sw, 26)
             self.stt_rects[sid] = sr
             is_s = (self.stt_engine == sid)
             bg = C_BORDER if is_s else C_BG
@@ -898,23 +911,43 @@ class SciTwiSettingsCard:
         self.rect_stt_gemini = self.stt_rects.get("gemini")
 
         # Silence Cutoff Timeout
-        lbl_sil = self.font_body.render(f"Silence Auto-Cutoff: {self.mic_silence_timeout:.1f}s", True, C_TEXT)
-        self.screen.blit(lbl_sil, (well.x + 12, well.y + 276))
+        lbl_sil = self.font_body.render(f"Silence Cutoff: {self.mic_silence_timeout:.1f}s", True, C_TEXT)
+        self.screen.blit(lbl_sil, (well.x + 12, well.y + 258))
 
-        self.rect_silence_down = pygame.Rect(well.x + 196, well.y + 272, 32, 24)
-        self.rect_silence_up = pygame.Rect(well.x + 234, well.y + 272, 32, 24)
+        self.rect_silence_down = pygame.Rect(well.x + 160, well.y + 254, 28, 24)
+        self.rect_silence_up = pygame.Rect(well.x + 194, well.y + 254, 28, 24)
         pygame.draw.rect(self.screen, C_BG, self.rect_silence_down, border_radius=5)
         pygame.draw.rect(self.screen, C_BG, self.rect_silence_up, border_radius=5)
         pygame.draw.rect(self.screen, C_WELL_BORDER, self.rect_silence_down, width=1, border_radius=5)
         pygame.draw.rect(self.screen, C_WELL_BORDER, self.rect_silence_up, width=1, border_radius=5)
         sd_t = self.font_bold.render("-", True, C_TEXT)
         su_t = self.font_bold.render("+", True, C_TEXT)
-        self.screen.blit(sd_t, (self.rect_silence_down.x + 11, self.rect_silence_down.y + 2))
-        self.screen.blit(su_t, (self.rect_silence_up.x + 10, self.rect_silence_up.y + 2))
+        self.screen.blit(sd_t, (self.rect_silence_down.x + 9, self.rect_silence_down.y + 2))
+        self.screen.blit(su_t, (self.rect_silence_up.x + 8, self.rect_silence_up.y + 2))
 
-        # Bottom Voice Command Shortcut info
-        lbl_vh = self.font_hint.render("Global Voice Hotkey: Ctrl + Shift + V  •  Click 🎙️ inside dialogue card", True, C_MUTED)
-        self.screen.blit(lbl_vh, (well.x + 12, well.y + 312))
+        # Wake Word Toggle & Phrase Input
+        self.rect_wake_toggle = pygame.Rect(well.x + 12, well.y + 290, 116, 26)
+        bg_wt = C_BORDER if self.wake_word_enabled else C_BG
+        border_wt = C_STAR if self.wake_word_enabled else C_WELL_BORDER
+        fg_wt = (255, 255, 255) if self.wake_word_enabled else C_MUTED
+        pygame.draw.rect(self.screen, bg_wt, self.rect_wake_toggle, border_radius=6)
+        pygame.draw.rect(self.screen, border_wt, self.rect_wake_toggle, width=1, border_radius=6)
+        wt_text = "● Wake: ON" if self.wake_word_enabled else "○ Wake: OFF"
+        wt_surf = self.font_bold.render(wt_text, True, fg_wt)
+        self.screen.blit(wt_surf, (self.rect_wake_toggle.x + (self.rect_wake_toggle.width - wt_surf.get_width()) // 2, self.rect_wake_toggle.y + 4))
+
+        self.rect_wake_words = pygame.Rect(well.x + 138, well.y + 290, 310, 26)
+        pygame.draw.rect(self.screen, (10, 10, 16), self.rect_wake_words, border_radius=6)
+        border_ww = C_BORDER if self.active_input == "wake_words" else C_WELL_BORDER
+        pygame.draw.rect(self.screen, border_ww, self.rect_wake_words, width=1, border_radius=6)
+        self._render_text_input_content(self.rect_wake_words, self.wake_words_text, is_active=(self.active_input == "wake_words"), is_masked=False, text_color=C_CYAN)
+
+        # Bottom Wake Word Hint & Shortcut info
+        lbl_wwh = self.font_hint.render("Wake calls (comma-separated): e.g. hey twi, hey twilight, twilight", True, C_MUTED)
+        self.screen.blit(lbl_wwh, (well.x + 12, well.y + 326))
+
+        lbl_vh = self.font_hint.render("Manual Controls: Ctrl + Shift + V (voice)  •  Ctrl + Shift + Space (summon)", True, (148, 163, 184))
+        self.screen.blit(lbl_vh, (well.x + 12, well.y + 350))
 
     # =========================================================================
     # TAB 2: SHORTCUTS & SYSTEM
@@ -924,6 +957,7 @@ class SciTwiSettingsCard:
         self.screen.blit(lbl_h, (well.x + 12, well.y + 14))
 
         shortcuts = [
+            ("Wake Calls", "Say 'Hey Twi', 'Hey Twilight', or 'Twilight' to wake her"),
             ("Ctrl + Shift + Space", "Summon Twilight input card immediately"),
             ("Ctrl + Shift + V", "Activate voice command / speech recognition"),
             ("Ctrl + Shift + P", "Toggle perching on active window ledge"),
@@ -1170,6 +1204,16 @@ class SciTwiSettingsCard:
                     self.mic_silence_timeout = min(3.0, round(self.mic_silence_timeout + 0.2, 1))
                     self.status_msg = f"Silence cutoff set to {self.mic_silence_timeout:.1f}s"
                     self.status_col = C_CYAN
+                    return True
+                if hasattr(self, "rect_wake_toggle") and self.rect_wake_toggle and self.rect_wake_toggle.collidepoint(mx, my):
+                    self.wake_word_enabled = not self.wake_word_enabled
+                    self.status_msg = "Wake Word: " + ("Enabled (always listening)" if self.wake_word_enabled else "Disabled")
+                    self.status_col = C_SUCCESS if self.wake_word_enabled else C_MUTED
+                    return True
+                if hasattr(self, "rect_wake_words") and self.rect_wake_words and self.rect_wake_words.collidepoint(mx, my):
+                    self.active_input = "wake_words"
+                    self.input_cursor_pos = len(self._get_active_text())
+                    self.input_selected_all = False
                     return True
 
             self.active_input = None

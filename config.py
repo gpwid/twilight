@@ -49,6 +49,10 @@ class Config:
     mic_energy_threshold: int = 400
     mic_device_index: int | None = None
 
+    # Wake Word Settings
+    wake_word_enabled: bool = True
+    wake_words: list[str] = field(default_factory=lambda: ["hey twi", "hey twilight", "twilight"])
+
     # Overlay UI settings
     halo_size: int = 70
     initial_x: int = -1

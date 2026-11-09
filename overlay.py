@@ -283,6 +283,7 @@ class SciTwiOverlay:
         self.voice_audio_level = 0.0
         self.voice_input_mgr = None
         self._mic_btn_rect = None
+        self._ui_lock = threading.Lock()
 
         # Dragging & physics tilt state
         self.is_dragging = False
@@ -305,13 +306,16 @@ class SciTwiOverlay:
                     self.win_y,
                     self.win_w,
                     self.win_h,
-                    win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW
+                    win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW | win32con.SWP_FRAMECHANGED
                 )
+                self._ensure_transparency(force=True)
             except Exception:
                 pass
 
     def _setup_win32_window(self):
         """Set window as transparent layered top-most window (hidden until assets are ready)."""
+        if not win32gui or not win32con:
+            return
         ex_style = win32gui.GetWindowLong(self.hwnd, win32con.GWL_EXSTYLE)
         win32gui.SetWindowLong(
             self.hwnd,
@@ -331,8 +335,35 @@ class SciTwiOverlay:
             self.win_y,
             self.win_w,
             self.win_h,
-            win32con.SWP_NOACTIVATE | win32con.SWP_HIDEWINDOW
+            win32con.SWP_NOACTIVATE | win32con.SWP_HIDEWINDOW | win32con.SWP_FRAMECHANGED
         )
+
+    def _ensure_transparency(self, force: bool = False):
+        """Continuously re-assert Win32 layered colorkey attributes to prevent black box glitch."""
+        if not win32gui or not win32con:
+            return
+        try:
+            ex_style = win32gui.GetWindowLong(self.hwnd, win32con.GWL_EXSTYLE)
+            if force or not (ex_style & win32con.WS_EX_LAYERED):
+                win32gui.SetWindowLong(
+                    self.hwnd,
+                    win32con.GWL_EXSTYLE,
+                    ex_style | win32con.WS_EX_LAYERED | win32con.WS_EX_TOPMOST
+                )
+                win32gui.SetLayeredWindowAttributes(
+                    self.hwnd,
+                    win32api.RGB(*COLORKEY),
+                    0,
+                    win32con.LWA_COLORKEY
+                )
+                win32gui.SetWindowPos(
+                    self.hwnd,
+                    win32con.HWND_TOPMOST,
+                    0, 0, 0, 0,
+                    win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED
+                )
+        except Exception:
+            pass
 
     def _load_expressions(self):
         """Load and cache smoothly scaled expression sprites."""
@@ -768,18 +799,19 @@ class SciTwiOverlay:
         self.state = "input"
         self.status_message = "Ready"
         self.last_input_activity = time.time()
+        self._ensure_transparency()
         try:
-            win32gui.ShowWindow(self.hwnd, win32con.SW_SHOW)
-            win32gui.SetWindowPos(
-                self.hwnd,
-                win32con.HWND_TOPMOST,
-                self.win_x,
-                self.win_y,
-                self.win_w,
-                self.win_h,
-                win32con.SWP_SHOWWINDOW
-            )
-            win32gui.SetForegroundWindow(self.hwnd)
+            if win32gui and win32con:
+                win32gui.SetWindowPos(
+                    self.hwnd,
+                    win32con.HWND_TOPMOST,
+                    self.win_x,
+                    self.win_y,
+                    self.win_w,
+                    self.win_h,
+                    win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED | win32con.SWP_SHOWWINDOW
+                )
+                win32gui.SetForegroundWindow(self.hwnd)
         except Exception:
             pass
 
@@ -901,6 +933,9 @@ class SciTwiOverlay:
     def update_and_render(self, dt: float) -> bool:
         """Process events and render frame. Returns False when application quits."""
         self.anim_time += dt
+        if int(self.anim_time) != int(self.anim_time - dt):
+            self._ensure_transparency()
+
         self._check_window_perch(dt)
         self._update_dynamic_study_state(dt)
 
