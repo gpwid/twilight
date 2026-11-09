@@ -60,6 +60,113 @@ def mark_action_tool_executed():
 def get_last_action_tool_time() -> float:
     return _LAST_ACTION_TOOL_TIME
 
+def sanitize_browser_query(raw_query: str) -> tuple[str, bool]:
+    """Strip routing context (e.g. 'on my chrome', 'in my browser', 'search for') and detect if query is a direct URL."""
+    clean = (raw_query or "").strip()
+    if not clean:
+        return "", False
+
+    if clean.startswith("http://") or clean.startswith("https://"):
+        return clean, True
+
+    # Strip routing platforms and browser mentions anywhere at the end or within routing phrases
+    clean = re.sub(
+        r'\s+(?:on|in|using|with|via)\s+(?:my\s+|the\s+)?(?:google\s+|new\s+tab\s+in\s+)?'
+        r'(?:chrome|browser|google|edge|firefox|brave|safari|internet|web)\s*(?:browser|tab)?\s*$',
+        '', clean, flags=re.IGNORECASE
+    ).strip()
+
+    clean = re.sub(
+        r'\b(?:in\s+)?(?:a\s+)?new\s+tab\b|\b(?:in\s+)?(?:my\s+)?tabs?\b|\b(?:on\s+)?(?:my\s+)?browser\b|\b(?:on\s+)?(?:my\s+)?chrome\b',
+        '', clean, flags=re.IGNORECASE
+    ).strip()
+
+    # Iteratively strip conversational command prefixes
+    for _ in range(3):
+        clean = re.sub(
+            r'^(?:(?:please\s+)?(?:can|could)\s+you\s+)?'
+            r'(?:open\s+(?:up\s+)?(?:a\s+)?new\s+tab\s+(?:and|with|to|for)?\s*|new\s+tab\s+(?:and|with|to|for)?\s*|'
+            r'open\s+(?:up\s+)?(?:a\s+)?tab\s+(?:and|with|to|for)?\s*|'
+            r'search\s+(?:for|up)?\s+|look\s+up\s+|find(?:\s+me)?\s+|google\s+|browse\s+|check\s+out\s+|'
+            r'open(?:\s+up)?\s+|show\s+(?:me\s+)?|pull\s+up\s+|and\s+)',
+            '', clean, flags=re.IGNORECASE
+        ).strip()
+
+    clean = re.sub(r'\s+(?:please|for\s+me|right\s+now|on\s+my\s+computer|on\s+my\s+pc)$', '', clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r'\s+', ' ', clean).strip()
+
+    # Check for direct domains like github.com, wikipedia.org, google.com
+    is_direct_url = bool(re.match(r'^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/[^\s]*)?$', clean))
+    return clean, is_direct_url
+
+def sanitize_app_name(raw_name: str) -> str:
+    """Sanitize application name from conversational voice phrasing (e.g. 'the figma app' -> 'figma')."""
+    clean = (raw_name or "").strip().lower()
+    if not clean:
+        return ""
+
+    for _ in range(2):
+        clean = re.sub(
+            r'^(?:(?:please\s+)?(?:can|could)\s+you\s+)?'
+            r'(?:open\s+(?:up\s+)?|launch\s+|start\s+|run\s+|switch\s+to\s+|bring\s+up\s+)?'
+            r'(?:the\s+|an?\s+|my\s+)?',
+            '', clean, flags=re.IGNORECASE
+        ).strip()
+        clean = re.sub(
+            r'\s+(?:app|application|program|window|browser|on\s+my\s+computer|on\s+my\s+pc|for\s+me|please)$',
+            '', clean, flags=re.IGNORECASE
+        ).strip()
+
+    alias_map = {
+        "google chrome": "chrome",
+        "google chrome browser": "chrome",
+        "chrome browser": "chrome",
+        "figma app": "figma",
+        "spotify music": "spotify",
+        "vs code": "code",
+        "visual studio code": "code",
+        "cmd": "cmd.exe",
+        "terminal": "wt.exe",
+        "windows terminal": "wt.exe",
+    }
+    return alias_map.get(clean, clean)
+
+def sanitize_music_query(raw_query: str) -> tuple[str, bool, str]:
+    """Clean music search queries, extract timestamps, and determine if playlist is requested."""
+    clean = (raw_query or "").strip()
+    if not clean:
+        return "", False, ""
+
+    ts = ""
+    ts_match = re.search(r'\b(?:at|from)\s+(\d+:\d+|\d+\s*(?:m|min|s|sec|seconds?))\b', clean, re.IGNORECASE)
+    if ts_match:
+        ts = ts_match.group(1)
+        clean = clean[:ts_match.start()] + clean[ts_match.end():]
+
+    is_playlist = bool(re.search(r'\bplaylists?\b', clean, re.IGNORECASE))
+
+    for _ in range(3):
+        clean = re.sub(
+            r'\s+(?:on\s+spotify|in\s+spotify|from\s+spotify|via\s+spotify|'
+            r'in\s+the\s+background|for\s+me|please|right\s+now)$',
+            '', clean, flags=re.IGNORECASE
+        ).strip()
+        clean = re.sub(r'\s+playlists?$', '', clean, flags=re.IGNORECASE).strip()
+
+        clean = re.sub(
+            r'^(?:(?:please\s+)?(?:can|could)\s+you\s+)?'
+            r'(?:open\s+(?:up\s+)?spotify\s+(?:and\s+)?|spotify\s+(?:and\s+)?|'
+            r'play\s+(?:up\s+)?|put\s+on\s+|listen\s+to\s+|hear\s+|shuffle\s+|load\s+|stream\s+|'
+            r'switch\s+to\s+|change\s+to\s+)?'
+            r'(?:a\s+|some\s+|any\s+|the\s+|my\s+|our\s+)?'
+            r'(?:song\s+(?:by|from)|songs\s+(?:by|from)|music\s+(?:by|from)|track\s+(?:by|from)|'
+            r'songs?|tracks?|music|playlist\s+called|playlist\s+named|playlist)?\s*',
+            '', clean, flags=re.IGNORECASE
+        ).strip()
+
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    return clean, is_playlist, ts
+
 def fetch_live_web_search(query: str) -> str:
     """Fetch live news, election returns, current events, and encyclopedic background for any query."""
     clean = query.strip()
@@ -361,77 +468,136 @@ def _fuzzy_score(query_str: str, candidate_str: str) -> float:
     return ratio
 
 def open_app(app_name: str) -> str:
-    """Dynamically launch any installed Windows application by name or fuzzy match."""
+    """Dynamically launch or focus any installed Windows application by name, guaranteeing active window focus."""
     mark_action_tool_executed()
     try:
         global _LAST_APP
-        clean = re.sub(r'^(?:up\s+|the\s+|an?\s+|my\s+)', '', app_name.strip().lower()).strip()
+        clean = sanitize_app_name(app_name)
+        if not clean:
+            return "Please specify which application to open."
         _LAST_APP = clean
 
-        # 1. Check direct PATH (shutil.which)
-        which_path = shutil.which(clean) or shutil.which(f"{clean}.exe")
-        if which_path:
-            subprocess.Popen([which_path])
-            return f"Successfully opened {clean}."
+        # 1. First, check if the application is already running and bring its window to active foreground focus
+        if focus_app_window(clean):
+            return f"Brought {clean.capitalize()} into active focus for you!"
 
-        # 2. Check Windows Registry App Paths (exact + fuzzy)
-        best_reg_path = None
-        best_reg_score = 0.0
-        for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                k = winreg.OpenKey(root_key, r"Software\Microsoft\Windows\CurrentVersion\App Paths")
-                num_subkeys = winreg.QueryInfoKey(k)[0]
-                for i in range(num_subkeys):
-                    sub = winreg.EnumKey(k, i)
-                    score = _fuzzy_score(clean, sub)
-                    if score > best_reg_score:
-                        sub_k = winreg.OpenKey(k, sub)
-                        exe_path, _ = winreg.QueryValueEx(sub_k, None)
-                        exe_path = os.path.expandvars(exe_path.strip('"'))
-                        if os.path.exists(exe_path):
-                            best_reg_score = score
-                            best_reg_path = exe_path
-            except Exception:
-                pass
+        # 2. Known application aliases and direct executables
+        common_apps = {
+            "chrome": ["chrome.exe", os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"), r"C:\Program Files\Google\Chrome\Application\chrome.exe", r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"],
+            "figma": ["figma.exe", os.path.expandvars(r"%LOCALAPPDATA%\Figma\Figma.exe"), os.path.expandvars(r"%APPDATA%\Figma\Figma.exe")],
+            "spotify": ["spotify.exe", os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe")],
+            "code": ["code.cmd", "code.exe", os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe")],
+            "discord": ["discord.exe", os.path.expandvars(r"%LOCALAPPDATA%\Discord\Update.exe --processStart Discord.exe")],
+            "steam": ["steam.exe", r"C:\Program Files (x86)\Steam\steam.exe"],
+            "edge": ["msedge.exe", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"],
+            "notepad": ["notepad.exe"],
+            "calc": ["calc.exe"],
+            "calculator": ["calc.exe"],
+            "terminal": ["wt.exe", "powershell.exe"],
+            "powershell": ["powershell.exe"],
+            "cmd": ["cmd.exe"]
+        }
 
-        if best_reg_path and best_reg_score >= 0.78:
-            os.startfile(best_reg_path)
-            return f"Successfully opened {os.path.basename(best_reg_path)}."
+        launched = False
+        candidates_to_try = common_apps.get(clean, [])
+        for candidate in candidates_to_try:
+            exe_or_cmd = candidate.split()[0]
+            if shutil.which(exe_or_cmd) or os.path.exists(exe_or_cmd):
+                try:
+                    if " " in candidate and not os.path.exists(candidate):
+                        subprocess.Popen(candidate, shell=True)
+                    else:
+                        os.startfile(candidate)
+                    launched = True
+                    break
+                except Exception:
+                    pass
 
-        # 3. Dynamically scan Desktop, Start Menu, Programs, and Taskbar shortcuts (exact + fuzzy)
-        search_dirs = get_search_directories()
-        candidates = []
-        for d in search_dirs:
-            for root, _, files in os.walk(d):
-                for f in files:
-                    ext = os.path.splitext(f)[1].lower()
-                    if ext not in (".lnk", ".url", ".exe"):
-                        continue
-                    fname_no_ext = os.path.splitext(f)[0].lower()
-                    score = _fuzzy_score(clean, fname_no_ext)
-                    if score >= 0.74:
-                        ext_priority = 0 if ext == ".lnk" else (1 if ext == ".url" else 2)
-                        candidates.append((score, -ext_priority, os.path.join(root, f), fname_no_ext))
+        # 3. Check direct PATH (shutil.which)
+        if not launched:
+            which_path = shutil.which(clean) or shutil.which(f"{clean}.exe")
+            if which_path:
+                try:
+                    subprocess.Popen([which_path])
+                    launched = True
+                except Exception:
+                    pass
 
-        if candidates:
-            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-            best_score, _, target_path, matched_name = candidates[0]
-            try:
-                os.startfile(target_path)
-            except Exception:
-                subprocess.Popen(["explorer.exe", target_path])
-            return f"Successfully opened {matched_name}."
+        # 4. Check Windows Registry App Paths (exact + fuzzy)
+        if not launched:
+            best_reg_path = None
+            best_reg_score = 0.0
+            for root_key in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    k = winreg.OpenKey(root_key, r"Software\Microsoft\Windows\CurrentVersion\App Paths")
+                    num_subkeys = winreg.QueryInfoKey(k)[0]
+                    for i in range(num_subkeys):
+                        sub = winreg.EnumKey(k, i)
+                        score = _fuzzy_score(clean, sub)
+                        if score > best_reg_score:
+                            sub_k = winreg.OpenKey(k, sub)
+                            exe_path, _ = winreg.QueryValueEx(sub_k, None)
+                            exe_path = os.path.expandvars(exe_path.strip('"'))
+                            if os.path.exists(exe_path):
+                                best_reg_score = score
+                                best_reg_path = exe_path
+                except Exception:
+                    pass
 
-        # 4. Try URI protocol or Windows shell execution directly
+            if best_reg_path and best_reg_score >= 0.78:
+                try:
+                    os.startfile(best_reg_path)
+                    launched = True
+                except Exception:
+                    pass
+
+        # 5. Check Desktop, Start Menu, Programs, and Taskbar shortcuts (exact + fuzzy)
+        if not launched:
+            search_dirs = get_search_directories()
+            candidates = []
+            for d in search_dirs:
+                if not os.path.exists(d):
+                    continue
+                for root, _, files in os.walk(d):
+                    for f in files:
+                        ext = os.path.splitext(f)[1].lower()
+                        if ext not in (".lnk", ".url", ".exe"):
+                            continue
+                        fname_no_ext = os.path.splitext(f)[0].lower()
+                        score = _fuzzy_score(clean, fname_no_ext)
+                        if score >= 0.74:
+                            ext_priority = 0 if ext == ".lnk" else (1 if ext == ".url" else 2)
+                            candidates.append((score, -ext_priority, os.path.join(root, f), fname_no_ext))
+
+            if candidates:
+                candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                best_score, _, target_path, matched_name = candidates[0]
+                try:
+                    os.startfile(target_path)
+                    launched = True
+                except Exception:
+                    subprocess.Popen(["explorer.exe", target_path])
+                    launched = True
+
+        # 6. Try URI protocol or Windows shell execution directly
         known_protocols = ("spotify", "discord", "steam", "slack", "zoommtg", "skype", "obsidian")
-        if clean in known_protocols:
+        if not launched and clean in known_protocols:
             try:
                 os.startfile(f"{clean}:")
-                return f"Launched {clean}."
+                launched = True
             except Exception:
                 pass
 
-        return f"Could not find '{app_name}' installed on this computer."
+        if not launched:
+            return f"Could not find '{app_name}' installed on this computer."
+
+        # 7. CRITICAL: Wait up to 3.5s for the newly launched app window to appear and bring it to active foreground focus!
+        for _ in range(16):
+            time.sleep(0.2)
+            if focus_app_window(clean):
+                return f"Successfully opened {clean.capitalize()} and brought it into focus!"
+
+        return f"Successfully launched {clean.capitalize()}!"
     except Exception as e:
         return f"Failed to open {app_name}: {e}"
 
@@ -684,9 +850,15 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
     mark_action_tool_executed()
     try:
         no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        clean = query.strip()
-        if not clean or clean.lower() in ("play", "resume", "unpause", "music", "song", "a song", "some music"):
-            return control_spotify("play")
+        clean, is_pl_intent, extracted_ts = sanitize_music_query(query)
+        if extracted_ts and not timestamp:
+            timestamp = extracted_ts
+
+        cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+        ensure_spotify_running()
+
+        if is_pl_intent:
+            return play_playlist(clean)
 
         # Detect if user is asking for an artist generally ("play kendrick lamar", "play a song from kendrick lamar")
         is_artist_request = bool(re.search(
@@ -695,129 +867,119 @@ def play_spotify(query: str, timestamp: str = "", is_random: bool = False) -> st
         ))
         if is_artist_request:
             is_random = True
-        
-        wants_alt = bool(re.search(r'\b(?:other|different|another|alternative|alternate|original|album|live|acoustic|remix|not this|switch|change)\b', clean, re.IGNORECASE))
 
-        ts_match = re.search(r'\b(?:at|from)\s+(\d+:\d+|\d+\s*(?:m|min|s|sec|seconds?))\b', clean, re.IGNORECASE)
-        if ts_match and not timestamp:
-            timestamp = ts_match.group(1)
-            clean = clean[:ts_match.start()] + clean[ts_match.end():]
+        wants_alt = bool(re.search(r'\b(?:other|different|another|alternative|alternate|original|live|acoustic|remix|not this|switch|change)\b', query, re.IGNORECASE))
 
-        clean = re.sub(r'^(?:no\b[,\s]*|not\s+this\b[,\s]*|switch\s+to\b|change\s+to\b|open\s+up\s+spotify\s+and\s+play\b|play\s+up\b|play\b|listen\s+to\b|put\s+on\b)\s*(?:a\b|an\b|some\b|any\b)?\s*', '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r'\s+on spotify$', '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r'\b(?:from\s+(?:any\s+)?(?:one\s+of\s+)?(?:my\s+)?playlists?)\b', '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r'\b(?:the\s+)?(?:other|different|another|alternative|alternate|original|album)\s+versions?\s+(?:of\s+)?\b', '', clean, flags=re.IGNORECASE)
-        clean = re.sub(r'\b(?:random|shuffle|any|some|songs?\s+(?:by|from)|a\s+song\s+(?:by|from)|songs?|tracks?)\b', '', clean, flags=re.IGNORECASE).strip()
-        clean = re.sub(r'^(?:by|from)\s+', '', clean, flags=re.IGNORECASE).strip()
-        clean = re.sub(r'\s+', ' ', clean).strip()
+        # Check if clean is a user playlist name
+        if clean:
+            pl_uri, pl_name = find_user_playlist(clean)
+            if pl_uri:
+                return play_playlist(pl_name)
 
-        if "playlist" in query.lower() or "playlist" in clean.lower():
-            return play_playlist(clean or query)
-        pl_uri, pl_name = find_user_playlist(clean)
-        if pl_uri:
-            return play_playlist(pl_name)
+        if not os.path.exists(cli):
+            encoded = urllib.parse.quote(clean or "music")
+            os.startfile(f"spotify:search:{encoded}")
+            return f"Opened Spotify to search for '{clean}'."
 
-        cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
-        if os.path.exists(cli):
-            ensure_spotify_running()
-            if is_random and not clean:
-                try:
-                    lib_res = subprocess.run([cli, "library", "list", "--type", "playlist", "--limit", "25", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win)
-                    if lib_res.returncode == 0 and lib_res.stdout.strip():
-                        lib_data = json.loads(lib_res.stdout)
-                        valid_pls = [p for p in lib_data.get("items", []) if p.get("uri") and p.get("name")]
-                        if valid_pls:
-                            chosen_pl = random.choice(valid_pls)
-                            pl_uri = chosen_pl["uri"]
-                            pl_name = chosen_pl["name"]
-                            pget = subprocess.run([cli, "playlist", "get", pl_uri, "--limit", "25", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win)
-                            if pget.returncode == 0 and pget.stdout.strip():
-                                pdata = json.loads(pget.stdout)
-                                tracks = pdata.get("tracks", [])
-                                if tracks:
-                                    chosen_track = random.choice(tracks)
-                                    target_uri = chosen_track["uri"]
-                                    subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
-                                    meta = get_track_metadata(target_uri)
-                                    t_name = meta.get("name") or chosen_track.get("name", "Unknown Track")
-                                    t_artist = meta.get("artist") or ", ".join(chosen_track.get("artists", []))
-                                    t_album = meta.get("album") or chosen_track.get("album", "")
-                                    alb_str = f" from the album '{t_album}'" if t_album else ""
-                                    year_str = f" ({meta['year']})" if meta.get("year") else ""
-                                    return f"Playing randomly chosen track from your playlist '{pl_name}': '{t_name}' by {t_artist}{alb_str}{year_str} on Spotify."
-                except Exception as e:
-                    print(f"[Tools] Random user playlist track error: {e}")
-
-            if not clean:
-                clean = "top hits"
-
+        # If user asked for generic music ("play some music", "play something"), pick from library or top tracks
+        if not clean or clean.lower() in ("play", "resume", "unpause", "music", "song", "a song", "some music", "something"):
+            # Check if Spotify is already paused with a track loaded
             try:
-                # Check if `clean` is an artist name (e.g. "kendrick lamar", "clairo")
-                # If it matches an artist name and no specific song was named, pick a random track from their catalog!
-                res_art = subprocess.run([cli, "search", clean, "--type", "artist", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
-                if res_art.returncode == 0 and res_art.stdout.strip():
-                    try:
-                        art_data = json.loads(res_art.stdout)
-                        artists = art_data.get("artists", [])
-                        if artists and artists[0].get("name", "").lower() == clean.lower():
-                            is_random = True
-                    except Exception:
-                        pass
+                np = subprocess.run([cli, "now-playing", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
+                if np.returncode == 0 and np.stdout.strip():
+                    np_data = json.loads(np.stdout)
+                    if np_data.get("uri") or np_data.get("item", {}).get("uri"):
+                        subprocess.run([cli, "resume"], capture_output=True, timeout=1.5, creationflags=no_win)
+                        return control_spotify("resume")
+            except Exception:
+                pass
+            # If nothing loaded, pick a random playlist from user library
+            return play_playlist("")
 
-                search_q = f"artist:{clean}" if is_random and " by " not in clean.lower() else clean
-                res = subprocess.run([cli, "search", search_q, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
+        try:
+            # Check if `clean` is an artist name (e.g. "kendrick lamar", "clairo")
+            res_art = subprocess.run([cli, "search", clean, "--type", "artist", "--format", "json", "--limit", "1"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+            if res_art.returncode == 0 and res_art.stdout.strip():
+                try:
+                    art_data = json.loads(res_art.stdout)
+                    artists = art_data.get("artists", [])
+                    if artists and artists[0].get("name", "").lower() == clean.lower():
+                        is_random = True
+                except Exception:
+                    pass
+
+            search_q = f"artist:{clean}" if is_random and " by " not in clean.lower() else clean
+            res = subprocess.run([cli, "search", search_q, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
+            matches = re.findall(r'(.*?)\s+(spotify:track:[a-zA-Z0-9]+)', res.stdout)
+
+            if not matches:
+                res = subprocess.run([cli, "search", clean, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
                 matches = re.findall(r'(.*?)\s+(spotify:track:[a-zA-Z0-9]+)', res.stdout)
-                
-                if not matches:
-                    res = subprocess.run([cli, "search", clean, "--type", "track", "--limit", "20"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
-                    matches = re.findall(r'(.*?)\s+(spotify:track:[a-zA-Z0-9]+)', res.stdout)
 
-                if matches:
-                    curr_uri = ""
-                    try:
-                        np_res = subprocess.run([cli, "now-playing", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.2, creationflags=no_win)
-                        if np_res.returncode == 0 and np_res.stdout.strip():
-                            np_data = json.loads(np_res.stdout)
-                            curr_uri = np_data.get("uri") or np_data.get("item", {}).get("uri", "")
-                    except Exception:
-                        pass
+            # If no track matches, search Spotify playlists or albums for this query
+            if not matches:
+                try:
+                    res_pl = subprocess.run([cli, "search", clean, "--type", "playlist,album", "--format", "json", "--limit", "5"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.0, creationflags=no_win)
+                    if res_pl.returncode == 0 and res_pl.stdout.strip():
+                        data_pl = json.loads(res_pl.stdout)
+                        pls = data_pl.get("playlists", []) or data_pl.get("albums", [])
+                        if pls and pls[0].get("uri"):
+                            target_uri = pls[0]["uri"]
+                            target_title = pls[0].get("name", clean)
+                            author = pls[0].get("author", "")
+                            author_str = f" by {author}" if author else ""
+                            subprocess.run([cli, "play", target_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+                            subprocess.run([cli, "navigate", target_uri], capture_output=True, timeout=1.5, creationflags=no_win)
+                            return f"Playing '{target_title}'{author_str} on Spotify!"
+                except Exception:
+                    pass
 
-                    if is_random and len(matches) > 1:
-                        valid_pool = [m for m in matches if m[1] != curr_uri] or matches
-                        picked_title, target_uri = random.choice(valid_pool)
-                    elif wants_alt or (curr_uri and matches[0][1] == curr_uri):
-                        alt_pool = [m for m in matches if m[1] != curr_uri]
-                        picked_title, target_uri = alt_pool[0] if alt_pool else matches[0]
+            if matches:
+                curr_uri = ""
+                try:
+                    np_res = subprocess.run([cli, "now-playing", "--format", "json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.2, creationflags=no_win)
+                    if np_res.returncode == 0 and np_res.stdout.strip():
+                        np_data = json.loads(np_res.stdout)
+                        curr_uri = np_data.get("uri") or np_data.get("item", {}).get("uri", "")
+                except Exception:
+                    pass
+
+                if is_random and len(matches) > 1:
+                    valid_pool = [m for m in matches if m[1] != curr_uri] or matches
+                    picked_title, target_uri = random.choice(valid_pool)
+                elif wants_alt or (curr_uri and matches[0][1] == curr_uri):
+                    alt_pool = [m for m in matches if m[1] != curr_uri]
+                    picked_title, target_uri = alt_pool[0] if alt_pool else matches[0]
+                else:
+                    picked_title, target_uri = matches[0]
+
+                picked_title = picked_title.strip()
+                print(f"[Tools] Playing Spotify URI '{target_uri}' ({picked_title})...")
+                subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+                subprocess.run([cli, "navigate", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
+
+                meta = get_track_metadata(target_uri)
+                t_name = meta.get("name") or picked_title
+                t_artist = meta.get("artist") or ""
+                t_album = meta.get("album") or ""
+                year_str = f" ({meta['year']})" if meta.get("year") else ""
+                artist_str = f" by {t_artist}" if t_artist else ""
+                album_str = f" (Album: '{t_album}'{year_str})" if t_album else year_str
+
+                req_ms = parse_timestamp_ms(timestamp) if timestamp else 0
+                if req_ms > 0:
+                    dur_ms = meta.get("duration_ms", 0) or get_track_duration_ms(target_uri)
+                    if dur_ms > 0 and req_ms > dur_ms:
+                        dur_str = format_ms(dur_ms)
+                        return f"'{t_name}' is only {dur_str} long, so {timestamp} is past the end of the song! Playing from the beginning instead."
                     else:
-                        picked_title, target_uri = matches[0]
-                    
-                    picked_title = picked_title.strip()
-                    print(f"[Tools] Playing Spotify URI '{target_uri}' ({picked_title})...")
-                    subprocess.run([cli, "play", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
-                    subprocess.run([cli, "navigate", target_uri], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5, creationflags=no_win)
+                        time.sleep(0.35)
+                        subprocess.run([cli, "seek", str(req_ms)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
+                        return f"Playing '{t_name}'{artist_str}{album_str} on Spotify starting at {timestamp}."
 
-                    meta = get_track_metadata(target_uri)
-                    t_name = meta.get("name") or picked_title
-                    t_artist = meta.get("artist") or ""
-                    t_album = meta.get("album") or ""
-                    year_str = f" ({meta['year']})" if meta.get("year") else ""
-                    artist_str = f" by {t_artist}" if t_artist else ""
-                    album_str = f" (Album: '{t_album}'{year_str})" if t_album else year_str
-
-                    req_ms = parse_timestamp_ms(timestamp) if timestamp else 0
-                    if req_ms > 0:
-                        dur_ms = meta.get("duration_ms", 0) or get_track_duration_ms(target_uri)
-                        if dur_ms > 0 and req_ms > dur_ms:
-                            dur_str = format_ms(dur_ms)
-                            return f"'{t_name}' is only {dur_str} long, so {timestamp} is past the end of the song! Playing from the beginning instead."
-                        else:
-                            time.sleep(0.35)
-                            subprocess.run([cli, "seek", str(req_ms)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0, creationflags=no_win)
-                            return f"Playing '{t_name}'{artist_str}{album_str} on Spotify starting at {timestamp}."
-
-                    return f"Playing '{t_name}'{artist_str}{album_str} on Spotify."
-            except Exception as e:
-                print(f"[Tools] spotify_cli error: {e}")
+                return f"Playing '{t_name}'{artist_str}{album_str} on Spotify."
+        except Exception as e:
+            print(f"[Tools] spotify_cli error: {e}")
 
         encoded = urllib.parse.quote(clean or "top hits")
         os.startfile(f"spotify:search:{encoded}")
@@ -857,26 +1019,36 @@ def get_now_playing() -> str:
         return f"Failed to get current playback info: {e}"
 
 def control_spotify(action: str) -> str:
-    """Control active Spotify playback: pause, stop, resume, play, next, skip, previous, shuffle, lyrics.
-    
-    Args:
-        action: 'pause', 'stop', 'resume', 'play', 'next', 'skip', 'previous', 'prev', 'rewind', 'shuffle', 'lyrics'.
-    """
+    """Control active Spotify playback: pause, stop, resume, play, next, skip, previous, shuffle, lyrics."""
     mark_action_tool_executed()
     try:
         act = action.strip().lower()
-        import cursor_assistant
-        cursor_assistant.control_media_with_cursor(act)
-
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+        no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
         if os.path.exists(cli):
             try:
-                if act in ("next", "skip"):
-                    subprocess.run([cli, "next"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5)
+                if act in ("pause", "stop"):
+                    subprocess.run([cli, "pause"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    return "Spotify playback paused."
+                elif act in ("play", "resume", "unpause"):
+                    subprocess.run([cli, "resume"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    return "Spotify playback resumed."
+                elif act in ("next", "skip"):
+                    subprocess.run([cli, "next"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    return "Skipped to next track on Spotify."
                 elif act in ("previous", "prev", "back", "rewind"):
-                    subprocess.run([cli, "previous"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1.5)
-            except Exception:
-                pass
+                    subprocess.run([cli, "previous"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    return "Returned to previous track on Spotify."
+                elif act in ("shuffle", "random"):
+                    subprocess.run([cli, "shuffle", "on"], capture_output=True, timeout=1.5, creationflags=no_win)
+                    return "Spotify shuffle turned on."
+            except Exception as cli_err:
+                print(f"[Tools] spotify_cli control error: {cli_err}")
+
+        # Fallback to cursor_assistant media control if CLI not present or failed
+        import cursor_assistant
+        cursor_assistant.control_media_with_cursor(act)
 
         verb_map = {
             "pause": "paused",
@@ -956,27 +1128,66 @@ def find_user_playlist(playlist_name: str) -> tuple[str | None, str | None]:
     return None, None
 
 def play_playlist(name: str = "") -> str:
-    """Play a playlist on Spotify with visual cursor automation."""
+    """Play a playlist on Spotify from user library or Spotify's catalog."""
     mark_action_tool_executed()
     try:
-        clean = (name or "").strip()
+        clean, _, _ = sanitize_music_query(name)
         cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+        ensure_spotify_running()
+        no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+        if not os.path.exists(cli):
+            encoded = urllib.parse.quote(clean or "playlist")
+            os.startfile(f"spotify:search:{encoded}")
+            return f"Opened Spotify to search for '{clean}'."
+
+        # 1. If no playlist name given, or "my playlist" / "some playlist", play random from user library
+        if not clean or clean in ("playlist", "my playlist", "a playlist", "playlists", "music"):
+            try:
+                res = subprocess.run([cli, "library", "list", "--type", "playlist", "--format", "json", "--limit", "50"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.5, creationflags=no_win)
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    valid_pls = [p for p in data.get("items", []) if p.get("uri") and p.get("name")]
+                    if valid_pls:
+                        chosen = random.choice(valid_pls)
+                        pl_uri = chosen["uri"]
+                        pl_name = chosen["name"]
+                        subprocess.run([cli, "play", pl_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+                        subprocess.run([cli, "navigate", pl_uri], capture_output=True, timeout=1.5, creationflags=no_win)
+                        return f"Playing your playlist '{pl_name}' on Spotify!"
+            except Exception as e:
+                print(f"[Tools] Random user playlist error: {e}")
+
+        # 2. Check user's saved library playlists first
         user_uri, user_name = find_user_playlist(clean)
-        if user_uri and os.path.exists(cli):
-            ensure_spotify_running()
-            subprocess.run([cli, "play", user_uri], capture_output=True, timeout=1.8)
-            subprocess.run([cli, "navigate", user_uri], capture_output=True, timeout=1.8)
+        if user_uri:
+            subprocess.run([cli, "play", user_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+            subprocess.run([cli, "navigate", user_uri], capture_output=True, timeout=1.5, creationflags=no_win)
             details = get_playlist_details(user_uri)
             desc_str = f" (Description: \"{details['description']}\")" if details.get("description") else ""
             tracks_str = f" — Featuring tracks: {', '.join(details['sample_tracks'][:3])}" if details.get("sample_tracks") else ""
             return f"Playing user playlist '{user_name or clean}'{desc_str}{tracks_str} on Spotify!"
 
-        clean = re.sub(r'^(?:(?:play|open|put on)\s+)?(?:one of\s+)?(?:my\s+)?playlists?\s*', '', clean, flags=re.IGNORECASE).strip()
-        encoded = urllib.parse.quote(clean or "playlist")
-        os.startfile(f"spotify:search:{encoded}")
-        if clean:
-            return f"Searching and playing your playlist '{clean}' on Spotify!"
-        return "Opened your Spotify playlists to play!"
+        # 3. If not in user library, search Spotify's catalog for public playlists!
+        try:
+            res = subprocess.run([cli, "search", clean, "--type", "playlist", "--format", "json", "--limit", "10"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3.5, creationflags=no_win)
+            if res.returncode == 0 and res.stdout.strip():
+                data = json.loads(res.stdout)
+                pls = data.get("playlists", [])
+                if pls:
+                    chosen_pl = pls[0]
+                    target_uri = chosen_pl.get("uri", "")
+                    target_title = chosen_pl.get("name", clean)
+                    author = chosen_pl.get("author", "Spotify")
+                    if target_uri:
+                        subprocess.run([cli, "play", target_uri], capture_output=True, timeout=2.0, creationflags=no_win)
+                        subprocess.run([cli, "navigate", target_uri], capture_output=True, timeout=1.5, creationflags=no_win)
+                        return f"Playing playlist '{target_title}' by {author} on Spotify!"
+        except Exception as se:
+            print(f"[Tools] Spotify catalog playlist search note: {se}")
+
+        # 4. Fallback: Search tracks or albums matching this name
+        return play_spotify(clean, is_random=True)
     except Exception as e:
         print(f"[Tools] play_playlist error: {e}")
         return f"Failed to play playlist: {e}"
@@ -1092,7 +1303,11 @@ def open_url(url: str) -> str:
         import httpx
         import html
 
-        clean = url.strip()
+        clean_q, is_direct = sanitize_browser_query(url)
+        if not is_direct:
+            return open_new_tab(clean_q)
+
+        clean = clean_q
         if not clean.startswith("http://") and not clean.startswith("https://"):
             clean = "https://" + clean
 
@@ -1287,10 +1502,19 @@ def focus_app_window(app_name: str) -> bool:
                         pname = psutil.Process(pid).name().lower()
                     except Exception:
                         pname = ""
-                if (clean in t) or (clean in pname):
+                is_match = (
+                    (clean in t) or (clean in pname) or
+                    (clean == "chrome" and ("chrome" in pname or "google chrome" in t)) or
+                    (clean == "figma" and ("figma" in pname or "figma" in t)) or
+                    (clean == "spotify" and ("spotify" in pname or "spotify" in t)) or
+                    (clean == "code" and ("code" in pname or "visual studio code" in t))
+                )
+                if is_match:
                     if not any(k in t for k in ["default ime", "msctfime", "ciceroui", "broadcast", "systemresource"]):
-                        found_hwnd = h
-                        return False
+                        r = win32gui.GetWindowRect(h)
+                        if (r[2] - r[0] > 100 and r[3] - r[1] > 60) or win32gui.IsIconic(h):
+                            found_hwnd = h
+                            return False
             except Exception:
                 pass
             return True
@@ -1659,23 +1883,47 @@ def close_tab(app_name: str = "") -> str:
         return f"Error closing tab: {e}"
 
 def open_new_tab(url: str = "") -> str:
-    """Open a brand new tab in the active browser (Chrome, Edge, Brave, Firefox) and optionally navigate to a URL or search query."""
+    """Open a brand new tab in the active browser (Chrome, Edge, Brave, Firefox), navigate to URL or search query, and dynamically scrape & summarize key information."""
     mark_action_tool_executed()
     try:
-        clean = (url or "").strip()
-        if clean:
-            import webbrowser
-            if not clean.startswith("http://") and not clean.startswith("https://"):
-                if "." in clean and not " " in clean:
-                    clean = "https://" + clean
-                else:
-                    clean = f"https://www.google.com/search?q={urllib.parse.quote(clean)}"
-            webbrowser.open(clean, new=2)
-            return f"Opened a new browser tab and navigated to '{clean}'."
-        import cursor_assistant
-        cursor_assistant.open_new_browser_tab("")
-        return "Opened a brand new tab for you in your browser."
+        clean_q, is_direct_url = sanitize_browser_query(url)
+        if not clean_q:
+            # Focus browser and open blank tab with Ctrl+T without cursor movements
+            if not focus_app_window("chrome"):
+                open_app("chrome")
+            time.sleep(0.08)
+            if win32api:
+                win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
+                win32api.keybd_event(ord('T'), 0, 0, 0)
+                time.sleep(0.02)
+                win32api.keybd_event(ord('T'), 0, win32con.KEYEVENTF_KEYUP, 0)
+                win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+            return "Opened a fresh new tab in your browser for you!"
+
+        # Determine target destination
+        if is_direct_url:
+            dest_url = clean_q if clean_q.startswith("http") else f"https://{clean_q}"
+        else:
+            dest_url = f"https://www.google.com/search?q={urllib.parse.quote(clean_q)}"
+
+        import webbrowser
+        webbrowser.open(dest_url, new=2)
+        time.sleep(0.20)
+        focus_app_window("chrome")
+
+        # Dynamically scrape & fetch live search or page findings for informational summaries
+        live_summary = fetch_live_web_search(clean_q)
+        if live_summary:
+            return (
+                f"Opened a new tab in your browser for '{clean_q}'.\n\n"
+                f"Live Web & Search Findings for '{clean_q}':\n"
+                f"{live_summary}\n\n"
+                f"[INSTRUCTION: Summarize the key findings, top places, or recommendations aloud to the user right now in Twilight's natural voice! Mention the top 2-3 specific spots or facts found so the user hears the answer directly while viewing the tab.]"
+            )
+
+        return f"Opened a new browser tab and navigated to '{dest_url}'."
     except Exception as e:
+        print(f"[Tools] open_new_tab error: {e}")
         return f"Error opening new tab: {e}"
 
 def switch_tab(direction: str = "next") -> str:

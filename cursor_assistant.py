@@ -875,7 +875,9 @@ def control_media_with_cursor(action: str = "pause", target_x: int = None, targe
         if has_cli:
             try:
                 import subprocess
-                subprocess.run([cli, "pause"], capture_output=True, timeout=1.2)
+                res = subprocess.run([cli, "pause"], capture_output=True, timeout=1.2)
+                if res.returncode == 0:
+                    return True
             except Exception:
                 pass
         win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
@@ -886,7 +888,9 @@ def control_media_with_cursor(action: str = "pause", target_x: int = None, targe
         if has_cli:
             try:
                 import subprocess
-                subprocess.run([cli, "resume"], capture_output=True, timeout=1.2)
+                res = subprocess.run([cli, "resume"], capture_output=True, timeout=1.2)
+                if res.returncode == 0:
+                    return True
             except Exception:
                 pass
         win32api.keybd_event(win32con.VK_MEDIA_PLAY_PAUSE, 0, 0, 0)
@@ -897,7 +901,9 @@ def control_media_with_cursor(action: str = "pause", target_x: int = None, targe
         if has_cli:
             try:
                 import subprocess
-                subprocess.run([cli, "next"], capture_output=True, timeout=1.2)
+                res = subprocess.run([cli, "next"], capture_output=True, timeout=1.2)
+                if res.returncode == 0:
+                    return True
             except Exception:
                 pass
         win32api.keybd_event(win32con.VK_MEDIA_NEXT_TRACK, 0, 0, 0)
@@ -908,11 +914,14 @@ def control_media_with_cursor(action: str = "pause", target_x: int = None, targe
         if has_cli:
             try:
                 import subprocess
-                subprocess.run([cli, "previous"], capture_output=True, timeout=1.2)
+                res = subprocess.run([cli, "previous"], capture_output=True, timeout=1.2)
+                if res.returncode == 0:
+                    return True
             except Exception:
                 pass
         win32api.keybd_event(win32con.VK_MEDIA_PREV_TRACK, 0, 0, 0)
         win32api.keybd_event(win32con.VK_MEDIA_PREV_TRACK, 0, 2, 0)
+        return True
         return True
 
     elif "shuffle" in act_lower:
@@ -1271,15 +1280,17 @@ def control_youtube_video_with_cursor(action: str = "pause", value: int = None):
             win32api.keybd_event(ord('K'), 0, win32con.KEYEVENTF_KEYUP, 0)
             return True
         elif act_lower in ("volume_up", "louder", "up", "raise_volume"):
-            glide_hardware_cursor(vid_x, vid_y, action="none", glide_time=0.15)
             for _ in range(3):
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, vid_x, vid_y, 120, 0)
+                win32api.keybd_event(win32con.VK_UP, 0, 0, 0)
                 time.sleep(0.02)
+                win32api.keybd_event(win32con.VK_UP, 0, win32con.KEYEVENTF_KEYUP, 0)
+            return True
         elif act_lower in ("volume_down", "quieter", "down", "lower_volume"):
-            glide_hardware_cursor(vid_x, vid_y, action="none", glide_time=0.15)
             for _ in range(3):
-                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, vid_x, vid_y, -120, 0)
+                win32api.keybd_event(win32con.VK_DOWN, 0, 0, 0)
                 time.sleep(0.02)
+                win32api.keybd_event(win32con.VK_DOWN, 0, win32con.KEYEVENTF_KEYUP, 0)
+            return True
         elif act_lower in ("mute", "unmute"):
             win32api.keybd_event(ord('M'), 0, 0, 0)
             time.sleep(0.03)
@@ -1477,15 +1488,8 @@ def set_master_volume_mute(mute: bool) -> bool:
     return False
 
 def adjust_volume_with_cursor(action: str = "up", percentage: int = None):
-    """Glide to Windows taskbar volume area and adjust system volume with exact percentage precision."""
+    """Adjust system master volume natively via Windows Core Audio endpoint with exact percentage precision."""
     attach_desktop()
-    try:
-        if win32api:
-            screen_w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
-            screen_h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
-            glide_hardware_cursor(screen_w - 90, screen_h - 24, action="none", glide_time=0.25)
-    except Exception:
-        pass
 
     # 1. Exact percentage requested
     if percentage is not None:

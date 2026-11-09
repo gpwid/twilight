@@ -122,7 +122,7 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_app",
-            "description": "Launch or focus an application or game on Windows.",
+            "description": "Launch or focus an application or game on Windows (e.g. 'chrome', 'figma', 'spotify', 'discord', 'code'). Guarantees bringing the window into active foreground focus.",
             "parameters": {
                 "type": "object",
                 "properties": {"app_name": {"type": "string", "description": "Application name or executable"}},
@@ -147,11 +147,11 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_new_tab",
-            "description": "Open a brand new tab in the active browser (Ctrl+T) and optionally navigate to a URL or search query.",
+            "description": "Open a brand new tab in the user's browser (Chrome, Edge, Brave) and navigate to a URL or search query. ALWAYS call this when the user asks to search or open something 'on chrome', 'on my browser', 'in a tab', or 'in a new tab'. Automatically sanitizes routing context like 'on my chrome' and dynamically scrapes & summarizes key findings so you can read the highlights aloud to the user.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "Optional URL or search query to open in the new tab"}
+                    "url": {"type": "string", "description": "Search query or website URL to open in the new tab"}
                 }
             }
         }
@@ -229,11 +229,11 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "play_spotify",
-            "description": "Play a track, album, or artist on Spotify.",
+            "description": "Play a track, album, artist, or music genre on Spotify. Supports custom start timestamps and random/shuffle mode.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Track, album, or artist"},
+                    "query": {"type": "string", "description": "Track, album, artist, or music genre"},
                     "timestamp": {"type": "string", "description": "Optional start timestamp e.g. 1:30"},
                     "is_random": {"type": "boolean", "description": "Whether to shuffle"}
                 },
@@ -245,11 +245,11 @@ OPENAI_TOOLS = [
         "type": "function",
         "function": {
             "name": "play_playlist",
-            "description": "Play a user playlist on Spotify by name.",
+            "description": "Play a playlist on Spotify by name (searches both user's library and Spotify's catalog).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Playlist name (e.g. 'sciset', 'study')"}
+                    "name": {"type": "string", "description": "Playlist name (e.g. 'all-nighter', 'lofi', 'study')"}
                 },
                 "required": ["name"]
             }
@@ -803,8 +803,11 @@ class SciTwiBrain:
         if m_new_tab:
             target_url = (m_new_tab.group(1) or "").strip()
             target_url = re.sub(r'^(?:and\s+)?(?:show\s+me|see)\s+.*', '', target_url, flags=re.IGNORECASE).strip()
-            _exec_record(open_new_tab, target_url)
-            return "[emotion: happy] Opened a fresh new tab for you!"
+            from assistant_tools import sanitize_browser_query
+            clean_q, is_direct = sanitize_browser_query(target_url)
+            if not clean_q:
+                _exec_record(open_new_tab, "")
+                return "[emotion: happy] Opened a fresh new tab in your browser for you!"
 
         # 5. Targeted Tab / Window Switching
         m_target = re.search(
@@ -1122,8 +1125,8 @@ class SciTwiBrain:
                         self._execute_tool("control_youtube_video", {"action": "play"})
                     elif re.search(r"^\s*(?:please\s+)?(?:resume|unpause)\b(?:\s+(?:the\s+)?(?:song|music|track|spotify|playlist))?$", user_lower):
                         self._execute_tool("control_spotify", {"action": "resume"})
-                    elif re.search(r"^\s*(?:please\s+)?(?:open\s+up\s+spotify\s+and\s+)?play\s+(.+)", user_lower):
-                        m_song = re.search(r"^\s*(?:please\s+)?(?:open\s+up\s+spotify\s+and\s+)?play\s+(.+)", user_lower)
+                    elif re.search(r"^\s*(?:please\s+)?(?:(?:can|could)\s+you\s+)?(?:open\s+up\s+spotify\s+and\s+)?(?:play|put\s+on|listen\s+to|shuffle)\s+(.+)", user_lower):
+                        m_song = re.search(r"^\s*(?:please\s+)?(?:(?:can|could)\s+you\s+)?(?:open\s+up\s+spotify\s+and\s+)?(?:play|put\s+on|listen\s+to|shuffle)\s+(.+)", user_lower)
                         song_q = m_song.group(1).strip()
                         if not any(k in song_q for k in ["game", "video", "yt", "youtube"]):
                             if "playlist" in song_q.lower():
