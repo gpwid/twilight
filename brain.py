@@ -682,6 +682,10 @@ class SciTwiBrain:
             self.last_action_kwargs = kwargs
             return fn(*args, **kwargs)
 
+        # 0. Instant Nevermind / Cancellation Fast-Path
+        if re.search(r'^\s*(?:nevermind|never\s+mind|cancel(?:\s+that)?|forget\s+it|nvm|dismiss|scratch\s+that|don\'?t\s+worry(?:\s+about\s+it)?)\s*$', user_lower) or re.search(r'\b(?:nevermind|never\s+mind)\b', user_lower):
+            return "[emotion: happy] Got it, never mind! Let me know if you need anything else."
+
         # 1. Repeat action guarantee ("again", "do it again", "once more", "repeat")
         if re.match(r'^(?:again|do\s+it\s+again|once\s+more|repeat|one\s+more\s+time|back\s+again)\b', user_lower):
             if getattr(self, "last_action_fn", None):
@@ -848,7 +852,7 @@ class SciTwiBrain:
             return "[emotion: happy] Switched to the next tab for you!"
 
         # 9. Application & Master Volume Controls (Spotify, Chrome, Discord, Master, etc.)
-        if ("volume" in user_lower or re.search(r'\b(?:mute|unmute)\b', user_lower)) and "video" not in user_lower:
+        if ("volume" in user_lower or re.search(r'\b(?:mute|unmute|louder|quieter|max\s+out)\b', user_lower)) and "video" not in user_lower:
             known_apps = ('spotify', 'chrome', 'discord', 'edge', 'firefox', 'vlc', 'steam', 'browser', 'music')
             detected_app = ""
             for app in known_apps:
@@ -860,15 +864,22 @@ class SciTwiBrain:
                 m_app_phrase = re.search(r'\bvolume\s+(?:on|for|in|of)\s+([a-zA-Z0-9_\-]+)\b|\b([a-zA-Z0-9_\-]+)\s+volume\b', user_lower)
                 if m_app_phrase:
                     cand = (m_app_phrase.group(1) or m_app_phrase.group(2) or '').strip()
-                    if cand not in ('set', 'master', 'system', 'pc', 'the', 'my', 'up', 'down', 'mute', 'unmute', 'turn'):
+                    if cand not in ('set', 'master', 'system', 'pc', 'the', 'my', 'up', 'down', 'mute', 'unmute', 'turn', 'max'):
                         detected_app = cand
 
             m_pct = re.search(r'(\d+)\s*%', user_lower) or re.search(r'\b(?:to\s+|at\s+)?(\d+)\b', user_lower)
-            pct = int(m_pct.group(1)) if m_pct and int(m_pct.group(1)) <= 100 else None
+            if m_pct and int(m_pct.group(1)) <= 100:
+                pct = int(m_pct.group(1))
+            elif re.search(r'\b(?:max(?:imum)?|full|hundred|a\s+hundred)\b', user_lower):
+                pct = 100
+            elif re.search(r'\b(?:zero|none|off)\b', user_lower):
+                pct = 0
+            else:
+                pct = None
 
             is_mute = bool(re.search(r'\bmute\b', user_lower) and 'unmute' not in user_lower)
             is_unmute = bool(re.search(r'\bunmute\b', user_lower))
-            is_up = bool(re.search(r'\b(?:up|raise|higher|increase)\b', user_lower))
+            is_up = bool(re.search(r'\b(?:up|raise|higher|increase|louder|max\s*out)\b', user_lower))
             is_down = bool(re.search(r'\b(?:down|lower|quieter|decrease|reduce)\b', user_lower))
 
             action = 'unmute' if is_unmute else ('mute' if is_mute else ('up' if is_up else ('down' if is_down else 'set')))

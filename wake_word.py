@@ -80,7 +80,8 @@ class WakeWordDetector:
     def _update_grammar(self):
         if not self.model:
             return
-        grammar = list(self.wake_words) + ["[unk]"]
+        interrupt_phrases = ["stop", "wait", "hold on", "quiet", "nevermind"]
+        grammar = list(self.wake_words) + interrupt_phrases + ["[unk]"]
         self.recognizer = KaldiRecognizer(self.model, 16000, json.dumps(grammar))
 
     def reload_config(self, new_config):
@@ -126,10 +127,6 @@ class WakeWordDetector:
     def _is_suppressed(self) -> bool:
         """Check if wake word detection should be temporarily paused to prevent acoustic loops."""
         now = time.time()
-        # Suppress if Twilight is speaking (or just finished within 1.2s cooldown)
-        if self.is_speaking_fn and self.is_speaking_fn():
-            self.last_suppressed_time = now
-            return True
         # Suppress if voice input manager is listening/recording/transcribing
         if self.is_voice_active_fn and self.is_voice_active_fn():
             self.last_suppressed_time = now
@@ -138,8 +135,8 @@ class WakeWordDetector:
         if self.is_processing_fn and self.is_processing_fn():
             self.last_suppressed_time = now
             return True
-        # Post-suppression acoustic cooldown (1.2s to clear room echo and driver buffers)
-        if now - self.last_suppressed_time < 1.2:
+        # Post-suppression acoustic cooldown (1.0s to clear room echo and driver buffers)
+        if now - self.last_suppressed_time < 1.0:
             return True
         # Minimum debounce interval between wake events (1.5s)
         if now - self.last_wake_time < 1.5:
@@ -218,9 +215,14 @@ class WakeWordDetector:
         if not detected_text:
             return False
 
-        for target in self.wake_words:
+        targets = list(self.wake_words)
+        # If Twilight is actively speaking, also allow quick voice interruption keywords
+        if self.is_speaking_fn and self.is_speaking_fn():
+            targets += ["stop", "wait", "hold on", "quiet", "nevermind"]
+
+        for target in targets:
             if target in detected_text:
-                print(f"[WakeWord] Detected wake phrase: '{target}' in '{detected_text}'")
+                print(f"[WakeWord] Detected wake/interrupt phrase: '{target}' in '{detected_text}'")
                 if self.recognizer:
                     self.recognizer.Reset()
                 if self.on_wake:

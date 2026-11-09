@@ -1589,7 +1589,7 @@ def set_app_volume_wasapi(app_name: str, percentage: int = None, action: str = "
             if "unmute" in act:
                 vol.SetMute(0, None)
                 cur_v = vol.GetMasterVolume()
-                final_pct = int(cur_v * 100)
+                final_pct = int(round(cur_v * 100))
                 found = True
             elif "mute" in act:
                 vol.SetMute(1, None)
@@ -1599,7 +1599,7 @@ def set_app_volume_wasapi(app_name: str, percentage: int = None, action: str = "
                 scalar = max(0.0, min(1.0, float(percentage) / 100.0))
                 vol.SetMasterVolume(scalar, None)
                 vol.SetMute(0, None)
-                final_pct = int(scalar * 100)
+                final_pct = int(round(scalar * 100))
                 found = True
             elif "up" in act or "down" in act:
                 cur = vol.GetMasterVolume()
@@ -1607,7 +1607,7 @@ def set_app_volume_wasapi(app_name: str, percentage: int = None, action: str = "
                 new_vol = min(1.0, cur + delta) if "up" in act else max(0.0, cur - delta)
                 vol.SetMasterVolume(new_vol, None)
                 vol.SetMute(0, None)
-                final_pct = int(new_vol * 100)
+                final_pct = int(round(new_vol * 100))
                 found = True
 
     return found, matched_app_name, final_pct
@@ -1669,10 +1669,12 @@ def adjust_volume_with_cursor(action: str = "up", percentage: int = None, app_na
                     set_app_volume_wasapi("spotify", action="mute")
                     return "Muted Spotify playback for you."
                 elif percentage is not None:
-                    scalar = max(0.0, min(1.0, float(percentage) / 100.0))
-                    subprocess.run([cli, "volume", f"{scalar:.2f}"], capture_output=True, timeout=1.5, creationflags=no_win)
-                    set_app_volume_wasapi("spotify", percentage=100, action="unmute")
-                    return f"Set Spotify volume to {percentage}% for you!"
+                    pct = max(0, min(100, int(round(float(percentage)))))
+                    scalar = max(0.0, min(1.0, float(pct) / 100.0))
+                    vol_str = "1.0" if pct >= 100 else f"{scalar:.2f}"
+                    subprocess.run([cli, "volume", vol_str], capture_output=True, timeout=1.5, creationflags=no_win)
+                    set_app_volume_wasapi("spotify", percentage=pct, action="unmute")
+                    return f"Set Spotify volume to {pct}% for you!"
                 elif "up" in act or "down" in act:
                     cur_scalar = 0.50
                     ok, _, wasapi_vol = set_app_volume_wasapi("spotify", action=act)
@@ -1680,8 +1682,10 @@ def adjust_volume_with_cursor(action: str = "up", percentage: int = None, app_na
                         cur_scalar = float(wasapi_vol) / 100.0
                     else:
                         cur_scalar = max(0.0, min(1.0, cur_scalar + (0.10 if "up" in act else -0.10)))
-                    subprocess.run([cli, "volume", f"{cur_scalar:.2f}"], capture_output=True, timeout=1.5, creationflags=no_win)
-                    return f"Adjusted Spotify volume {act} to {int(cur_scalar * 100)}% for you!"
+                    cur_pct = max(0, min(100, int(round(cur_scalar * 100))))
+                    vol_str = "1.0" if cur_pct >= 100 else f"{cur_scalar:.2f}"
+                    subprocess.run([cli, "volume", vol_str], capture_output=True, timeout=1.5, creationflags=no_win)
+                    return f"Adjusted Spotify volume {act} to {cur_pct}% for you!"
 
         # General application volume via Windows WASAPI Audio Sessions (Chrome, Discord, Edge, VLC, etc.)
         ok, matched_app, final_vol = set_app_volume_wasapi(app_target, percentage=percentage, action=act)
@@ -1727,7 +1731,7 @@ def adjust_volume_with_cursor(action: str = "up", percentage: int = None, app_na
         new_vol = min(1.0, cur + delta)
 
     set_master_volume_scalar(new_vol)
-    return f"Adjusted volume {action} to {int(new_vol * 100)}% for you!"
+    return f"Adjusted volume {action} to {int(round(new_vol * 100))}% for you!"
 
 def scroll_page_with_cursor(direction: str = "down", amount: int = 400, center_text: str = ""):
     """Smoothly scroll active window or browser, optionally centering a matching section or text."""

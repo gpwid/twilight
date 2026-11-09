@@ -88,8 +88,24 @@ def main():
             ov.is_processing = True
             ov.set_state("thinking", "Formulating a reply...", query=user_prompt)
         
-        # Intercept "settings" command to launch the settings popup window
         clean_prompt = user_prompt.strip().lower()
+        # Intercept "nevermind" / cancellation commands immediately
+        if re.search(r'^\s*(?:nevermind|never\s+mind|cancel(?:\s+that)?|forget\s+it|nvm|dismiss|scratch\s+that|don\'?t\s+worry(?:\s+about\s+it)?)\s*$', clean_prompt) or re.search(r'\b(?:nevermind|never\s+mind)\b', clean_prompt):
+            ov = overlay_ref[0]
+            if ov:
+                ov.show_input = False
+                ov.input_text = ""
+                ov.cursor_pos = 0
+                ov.selection_active = False
+                ov.is_processing = False
+                ov.is_trailer = False
+                ov.show_response_card("Got it, never mind! Let me know if you need anything else.", user_query=user_prompt, emotion="happy")
+                ov.response_start_time = time.time()
+                ov._current_read_duration = 2.4
+            audio.speak("Got it, never mind!")
+            return
+
+        # Intercept "settings" command to launch the settings popup window
         if clean_prompt in ("settings", "setting", "config", "open settings", "open setting"):
             try:
                 import subprocess
@@ -205,6 +221,16 @@ def main():
             ov.voice_state = "idle"
             ov.status_message = "Ready"
 
+    def on_interrupt_speech():
+        """Barge-in voice interruption: halt active speech immediately and cut to listening with authentic anime shocked face."""
+        if audio.is_speaking():
+            print("[Twilight] Interrupted while speaking! Halting playback and switching to listening.")
+            audio.stop()
+        ov = overlay_ref[0]
+        if ov:
+            ov.dismiss_response()
+            ov.set_state("idle", "Listening", emotion="interrupted")
+
     voice_mgr = VoiceInputManager(
         config=config,
         is_speaking_fn=audio.is_speaking,
@@ -212,17 +238,22 @@ def main():
         on_audio_level=on_voice_audio_level,
         on_transcription_complete=on_voice_transcription,
         on_error=on_voice_error,
+        on_interrupt=on_interrupt_speech,
     )
     overlay.set_voice_input_manager(voice_mgr)
+    overlay.on_interrupt_callback = on_interrupt_speech
     print(f"[VoiceInput] Engine: {getattr(config, 'stt_engine', 'groq_whisper')} | Hotkey: {getattr(config, 'voice_input_hotkey', 'ctrl+shift+v')}")
 
     # 7. Initialize Local Wake-Word Detector
     def on_wake_detected(phrase: str):
-        print(f"[Twilight] Wake phrase recognized: '{phrase}'!")
-        ov = overlay_ref[0]
-        if ov:
-            ov.show_input = False
-            ov.show_response = False
+        print(f"[Twilight] Wake/interrupt phrase recognized: '{phrase}'!")
+        if audio.is_speaking():
+            on_interrupt_speech()
+        else:
+            ov = overlay_ref[0]
+            if ov:
+                ov.show_input = False
+                ov.show_response = False
         voice_mgr.start_listening()
 
     wake_detector = WakeWordDetector(

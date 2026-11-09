@@ -36,6 +36,7 @@ class VoiceInputManager:
         on_audio_level: Optional[Callable[[float], None]] = None,
         on_transcription_complete: Optional[Callable[[str], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        on_interrupt: Optional[Callable[[], None]] = None,
     ):
         self.config = config
         self.is_speaking_fn = is_speaking_fn
@@ -43,6 +44,7 @@ class VoiceInputManager:
         self.on_audio_level = on_audio_level
         self.on_transcription_complete = on_transcription_complete
         self.on_error = on_error
+        self.on_interrupt = on_interrupt
 
         self.state = self.STATE_IDLE
         self._lock = threading.RLock()
@@ -78,10 +80,15 @@ class VoiceInputManager:
     def start_listening(self):
         """Begin non-blocking microphone capture with Voice Activity Detection."""
         with self._lock:
-            # If Twilight's own TTS is currently speaking, wait or abort to prevent audio feedback
+            # If Twilight's own TTS is currently speaking, barge-in interrupt immediately!
             if self.is_speaking_fn and self.is_speaking_fn():
-                print("[VoiceInput] Twilight is currently speaking. Waiting for speech to finish before listening.")
-                return
+                print("[VoiceInput] Interruption: Twilight was speaking. Triggering barge-in.")
+                if self.on_interrupt:
+                    try:
+                        self.on_interrupt()
+                    except Exception as e:
+                        print(f"[VoiceInput] on_interrupt error: {e}")
+                time.sleep(0.08)  # Brief cushion for soundcard buffer flush
 
             if self.is_active():
                 return

@@ -236,8 +236,10 @@ class SciTwiOverlay:
         self.current_emotion = "idle"
         self.status_message = "Ready"
         self.anim_time = 0.0
+        self.startup_time = time.time()
         self.state_change_time = time.time()
         self.current_bob_y = 0.0
+        self.on_interrupt_callback = None
 
         # Load expression sprites
         self.expressions = {}
@@ -545,6 +547,30 @@ class SciTwiOverlay:
         except Exception:
             pass
 
+    def _is_spotify_actively_playing(self) -> bool:
+        """Cached non-blocking check to verify if Spotify is actively playing (vs paused or stopped)."""
+        now = time.time()
+        if now - getattr(self, "_last_spotify_check_time", 0.0) < 2.5:
+            return getattr(self, "_spotify_is_playing_cache", False)
+        self._last_spotify_check_time = now
+
+        cli = os.path.expandvars(r"%APPDATA%\Spotify\spotify_cli.exe")
+        if os.path.exists(cli):
+            try:
+                import subprocess, json
+                no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                res = subprocess.run([cli, "now-playing", "--format", "json"], capture_output=True, text=True, timeout=0.8, creationflags=no_win)
+                if res.returncode == 0 and res.stdout.strip():
+                    data = json.loads(res.stdout)
+                    cp = data.get("currently_playing", {})
+                    is_playing = bool(cp.get("is_playing", False))
+                    self._spotify_is_playing_cache = is_playing
+                    return is_playing
+            except Exception:
+                pass
+        self._spotify_is_playing_cache = False
+        return False
+
     def _detect_media_playback_kind(self) -> str:
         """Return 'music' if music is playing, 'video' if a non-music video/stream is playing, or '' if silent."""
         if getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn():
@@ -567,9 +593,12 @@ class SciTwiOverlay:
                         if " - " in title and not t_low.startswith("spotify") and not any(
                             b in t_low for b in ("google chrome", "microsoft edge", "brave", "visual studio", "discord", "youtube")
                         ):
-                            media_kind_candidate = "music"
-                        # 2. Dedicated music web players
-                        elif any(k in t_low for k in ("youtube music", "soundcloud", "spotify", "apple music", "bandcamp")):
+                            if self._is_spotify_actively_playing():
+                                media_kind_candidate = "music"
+                        # 2. Dedicated music web players (must be actual web player, not Spotify desktop window)
+                        elif any(k in t_low for k in ("youtube music", "soundcloud", "apple music", "bandcamp")) or (
+                            "spotify" in t_low and "web player" in t_low
+                        ):
                             media_kind_candidate = "music"
                         # 3. YouTube / Twitch / Netflix / VLC: check if title looks like a song or a normal video
                         elif any(k in t_low for k in ("youtube", "twitch", "netflix", "vlc", "stremio")):
@@ -632,7 +661,7 @@ class SciTwiOverlay:
 
                 if self._audio_meter:
                     peak = float(self._audio_meter.GetPeakValue())
-                    if peak > 0.003:
+                    if peak > 0.035:
                         self._last_audio_peak_time = time.time()
                         return media_kind_candidate
                     if time.time() - getattr(self, "_last_audio_peak_time", 0.0) < 1.0:
@@ -646,6 +675,10 @@ class SciTwiOverlay:
 
     def _get_ambient_context(self) -> tuple[str, str, str]:
         """Determine (state, emotion, status_msg) dynamically from live music, video, active window, and user AFK time."""
+        # 10-second startup grace period: remain in calm idle state upon launching
+        if time.time() - getattr(self, "startup_time", 0.0) < 10.0:
+            return "idle", "idle", "Listening"
+
         media_kind = self._detect_media_playback_kind()
         if media_kind == "music":
             return "music", "music", "Playing music"
@@ -696,7 +729,15 @@ class SciTwiOverlay:
         self.voice_input_mgr = mgr
 
     def toggle_voice_input(self):
-        """Toggle voice capture on or off."""
+        """Toggle voice capture on or off. Halts TTS speech immediately if speaking (barge-in)."""
+        if getattr(self, "is_tts_speaking_fn", None) and self.is_tts_speaking_fn():
+            if getattr(self, "on_interrupt_callback", None):
+                try:
+                    self.on_interrupt_callback()
+                except Exception as e:
+                    print(f"[Overlay] Error in on_interrupt_callback: {e}")
+            self.dismiss_response()
+            self.set_state("idle", "Listening", emotion="interrupted")
         if self.voice_input_mgr:
             self.voice_input_mgr.toggle_listening()
 
