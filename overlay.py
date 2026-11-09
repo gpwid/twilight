@@ -277,6 +277,13 @@ class SciTwiOverlay:
         self.response_start_time = 0.0
         self.speech_scroll_y = 0
 
+        # Voice Command / Speech-to-Text State
+        self.voice_state = "idle"  # "idle", "listening", "recording", "processing"
+        self.voice_details = ""
+        self.voice_audio_level = 0.0
+        self.voice_input_mgr = None
+        self._mic_btn_rect = None
+
         # Dragging & physics tilt state
         self.is_dragging = False
         self.drag_start_x = 0
@@ -654,6 +661,15 @@ class SciTwiOverlay:
         st, emo, msg = self._get_ambient_context()
         self.set_state(st, status_msg=msg, emotion=emo)
 
+    def set_voice_input_manager(self, mgr):
+        """Bind the VoiceInputManager instance for voice recognition controls."""
+        self.voice_input_mgr = mgr
+
+    def toggle_voice_input(self):
+        """Toggle voice capture on or off."""
+        if self.voice_input_mgr:
+            self.voice_input_mgr.toggle_listening()
+
     def _update_dynamic_study_state(self, dt: float):
         """Poll live music, video, active app, and AFK state every 1.0s when not actively in input/thinking/speaking."""
         now = time.time()
@@ -907,6 +923,7 @@ class SciTwiOverlay:
         input_w = 440
         input_h = 108
         input_card_rect = self._calculate_card_rect(input_w, input_h)
+        voice_card_rect = self._calculate_card_rect(340, 96)
 
         line_height = 20
         num_lines = max(1, len(self.response_lines))
@@ -982,7 +999,9 @@ class SciTwiOverlay:
                             pass
                     else:
                         if self.show_input:
-                            if input_card_rect.collidepoint(mx, my):
+                            if self._mic_btn_rect and self._mic_btn_rect.collidepoint(mx, my):
+                                self.toggle_voice_input()
+                            elif input_card_rect.collidepoint(mx, my):
                                 well_x = input_card_rect.x + 20 - getattr(self, "input_scroll_x", 0)
                                 rel_x = mx - well_x
                                 best_pos = len(self.input_text)
@@ -997,6 +1016,12 @@ class SciTwiOverlay:
                             else:
                                 self.show_input = False
                                 self.selection_active = False
+                                self.restore_ambient_state()
+                        elif self.voice_state in ("listening", "recording", "processing") and not self.show_response:
+                            if not voice_card_rect.collidepoint(mx, my):
+                                if self.voice_input_mgr:
+                                    self.voice_input_mgr.cancel()
+                                self.voice_state = "idle"
                                 self.restore_ambient_state()
                         elif self.show_response and not resp_card_rect.collidepoint(mx, my):
                             if not getattr(self, "is_processing", False):
@@ -1029,11 +1054,20 @@ class SciTwiOverlay:
                 pass
 
             elif event.type == pygame.KEYDOWN:
+                if self.voice_state in ("listening", "recording", "processing") and event.key == pygame.K_ESCAPE:
+                    if self.voice_input_mgr:
+                        self.voice_input_mgr.cancel()
+                    self.voice_state = "idle"
+                    self.restore_ambient_state()
+                    continue
+
                 if self.show_input:
                     self.last_input_activity = time.time()
                     self.cursor_visible = True
                     self.last_cursor_toggle = time.time()
-                    if event.key == pygame.K_ESCAPE:
+                    if (event.key == pygame.K_v) and (event.mod & pygame.KMOD_CTRL) and (event.mod & pygame.KMOD_SHIFT):
+                        self.toggle_voice_input()
+                    elif event.key == pygame.K_ESCAPE:
                         self.show_input = False
                         self.selection_active = False
                         self.restore_ambient_state()
@@ -1161,15 +1195,19 @@ class SciTwiOverlay:
         # 1. Render Floating Halo & Companion Sprite
         self._render_halo_and_sprite(dt)
 
-        # 2. Render Thinking Indicator if waiting for Gemini
-        if self.state == "thinking" and not self.show_input and not self.show_response:
+        # 2. Render Thinking Indicator if waiting for Gemini (and not in voice input)
+        if self.state == "thinking" and not self.show_input and not self.show_response and self.voice_state == "idle":
             self._render_thinking_card(think_card_rect)
 
-        # 3. Render Speech Bubble / Response Card if dialogue is active
+        # 3. Render Voice Listening Card if active
+        if self.voice_state in ("listening", "recording", "processing") and not self.show_input and not self.show_response:
+            self._render_voice_card(voice_card_rect)
+
+        # 4. Render Speech Bubble / Response Card if dialogue is active
         if self.show_response:
             self._render_response_card(resp_card_rect)
 
-        # 4. Render Input Card if typing
+        # 5. Render Input Card if typing
         if self.show_input:
             self._render_input_box(input_card_rect)
 
@@ -1192,6 +1230,16 @@ class SciTwiOverlay:
             pedestal_col = (244, 114, 182)   # Hot Pink
             accent_col = (255, 255, 255)
             speed_mult = 2.5
+        elif self.voice_state in ("listening", "recording", "processing"):
+            bob_y = math.sin(self.anim_time * 3.6) * 4.0
+            # Active starlight pulse between electric cyan and glowing purple
+            pulse_t = (math.sin(self.anim_time * 6.0) + 1.0) * 0.5
+            r = int(56 * (1.0 - pulse_t) + 168 * pulse_t)
+            g = int(189 * (1.0 - pulse_t) + 85 * pulse_t)
+            b = int(248 * (1.0 - pulse_t) + 247 * pulse_t)
+            pedestal_col = (r, g, b)
+            accent_col = (255, 255, 255)
+            speed_mult = 2.4
         elif self.state == "thinking":
             bob_y = math.sin(self.anim_time * 2.8) * 3.5
             pedestal_col = (56, 189, 248)    # Electric Cyan
@@ -1250,6 +1298,8 @@ class SciTwiOverlay:
         # Layer 4: Companion Character Sprite with Dynamic Emotion & Tilt
         if self.is_dragging:
             sprite_key = "when_dragged" if "when_dragged" in self.expressions else "flustered"
+        elif self.voice_state in ("listening", "recording", "processing"):
+            sprite_key = "talking" if self.voice_state == "recording" else "thinking"
         elif self.state == "thinking":
             sprite_key = "thinking"
         elif self.state == "music":
@@ -1426,7 +1476,31 @@ class SciTwiOverlay:
         pygame.draw.rect(self.screen, (17, 17, 27), well_rect, border_radius=8)
         pygame.draw.rect(self.screen, (76, 79, 105), well_rect, width=1, border_radius=8)
 
-        inner_text_rect = pygame.Rect(well_rect.x + 8, well_rect.y + 4, well_rect.width - 16, well_rect.height - 8)
+        # Microphone Action Button (right end of input well)
+        mic_btn_rect = pygame.Rect(well_rect.right - 30, well_rect.y + 3, 26, 28)
+        self._mic_btn_rect = mic_btn_rect
+        is_voice_active = self.voice_state in ("listening", "recording", "processing")
+        if is_voice_active:
+            mic_bg = (88, 28, 135)
+            mic_border = (56, 189, 248)
+            mic_col = (56, 189, 248) if int(self.anim_time * 6) % 2 == 0 else (255, 255, 255)
+        else:
+            mic_bg = (30, 30, 46)
+            mic_border = (76, 79, 105)
+            mic_col = (192, 132, 252)
+
+        pygame.draw.rect(self.screen, mic_bg, mic_btn_rect, border_radius=6)
+        pygame.draw.rect(self.screen, mic_border, mic_btn_rect, width=1, border_radius=6)
+
+        # Vector Microphone Icon
+        mcx = mic_btn_rect.centerx
+        mcy = mic_btn_rect.centery - 2
+        pygame.draw.rect(self.screen, mic_col, (mcx - 3, mcy - 5, 6, 9), border_radius=3)
+        pygame.draw.arc(self.screen, mic_col, (mcx - 6, mcy - 3, 12, 9), 3.1415, 0.0, 1)
+        pygame.draw.line(self.screen, mic_col, (mcx, mcy + 6), (mcx, mcy + 9), 1)
+        pygame.draw.line(self.screen, mic_col, (mcx - 4, mcy + 9), (mcx + 4, mcy + 9), 1)
+
+        inner_text_rect = pygame.Rect(well_rect.x + 8, well_rect.y + 4, well_rect.width - 42, well_rect.height - 8)
         self.screen.set_clip(inner_text_rect)
 
         if self.input_text:
@@ -1455,15 +1529,90 @@ class SciTwiOverlay:
                 caret_x = draw_x + cursor_offset + 1
                 pygame.draw.line(self.screen, (192, 132, 252), (caret_x, draw_y), (caret_x, draw_y + 20), 2)
         else:
-            placeholder_surf = self.font_input.render("Ask Twilight anything... (e.g. check screen, play music)", True, (108, 112, 134))
+            if is_voice_active:
+                if self.voice_state == "processing":
+                    v_txt = "Processing voice command..."
+                elif self.voice_state == "recording":
+                    v_txt = "Listening to your request..."
+                else:
+                    v_txt = "I'm listening... Speak now!"
+                placeholder_surf = self.font_input.render(v_txt, True, (56, 189, 248))
+            else:
+                placeholder_surf = self.font_input.render("Ask Twilight anything... (or press Ctrl+Shift+V to talk)", True, (108, 112, 134))
             self.screen.blit(placeholder_surf, (inner_text_rect.x, inner_text_rect.y + 2))
             if self.cursor_visible:
                 pygame.draw.line(self.screen, (192, 132, 252), (inner_text_rect.x, inner_text_rect.y + 2), (inner_text_rect.x, inner_text_rect.y + 22), 2)
 
         self.screen.set_clip(None)
 
-        hint_surf = self.font_hint.render("Press [Enter] send  •  [Esc] close  •  [Ctrl+Shift+P] perch", True, (148, 163, 184))
+        hint_surf = self.font_hint.render("Press [Enter] send  •  [Ctrl+Shift+V] voice  •  [Esc] close", True, (148, 163, 184))
         self.screen.blit(hint_surf, (card_x + 14, card_y + card_h - 22))
+
+    def _render_voice_card(self, card_rect: pygame.Rect):
+        """Draw sleek, illuminated listening card with animated soundwave audio meter."""
+        card_x, card_y, card_w, card_h = card_rect
+
+        # Semi-transparent dark glass container
+        pygame.draw.rect(self.screen, (24, 24, 37), card_rect, border_radius=12)
+        border_col = (56, 189, 248) if self.voice_state in ("recording", "processing") else (168, 85, 247)
+        pygame.draw.rect(self.screen, border_col, card_rect, width=2, border_radius=12)
+
+        # Title & Starlight Star
+        draw_six_pointed_star(self.screen, card_x + 22, card_y + 18, (56, 189, 248), size=6.5)
+        title_text = "Twilight - Listening" if self.voice_state != "processing" else "Twilight - Processing"
+        title_surf = self.font_title.render(title_text, True, (216, 180, 254))
+        self.screen.blit(title_surf, (card_x + 34, card_y + 10))
+
+        # Dynamic Soundwave Visualizer Bars (7 bars centered)
+        wave_cx = card_x + card_w // 2
+        wave_base_y = card_y + 40
+        bar_w = 4
+        bar_gap = 4
+        num_bars = 7
+        total_w = num_bars * bar_w + (num_bars - 1) * bar_gap
+        start_x = wave_cx - total_w // 2
+
+        for i in range(num_bars):
+            dist_from_center = abs(i - 3)
+            center_weight = 1.0 - (dist_from_center * 0.18)
+
+            if self.voice_state == "processing":
+                # Rolling loading sparkle wave
+                wave_t = math.sin(self.anim_time * 8.0 + i * 0.8)
+                bar_h = int(6 + 12 * max(0.0, wave_t))
+                col = (56, 189, 248)
+            elif self.voice_state == "recording":
+                # Audio-reactive wave based on real-time microphone RMS level
+                wave_t = 0.5 + 0.5 * math.sin(self.anim_time * 14.0 + i * 1.1)
+                audio_amp = max(0.15, self.voice_audio_level)
+                bar_h = int(5 + 24 * audio_amp * center_weight * wave_t)
+                col = (244, 114, 182) if i % 2 == 0 else (56, 189, 248)
+            else:  # listening / waiting for voice
+                wave_t = 0.5 + 0.5 * math.sin(self.anim_time * 4.0 + i * 0.9)
+                bar_h = int(4 + 8 * wave_t * center_weight)
+                col = (168, 85, 247)
+
+            bx = start_x + i * (bar_w + bar_gap)
+            by = wave_base_y - bar_h // 2
+            pygame.draw.rect(self.screen, col, (bx, by, bar_w, bar_h), border_radius=2)
+
+        # Status subtitle line
+        if self.voice_state == "processing":
+            sub_text = "Transcribing audio..."
+            sub_col = (56, 189, 248)
+        elif self.voice_state == "recording":
+            sub_text = "Listening to your request..."
+            sub_col = (244, 114, 182)
+        else:
+            sub_text = "I'm listening... Speak now!"
+            sub_col = (148, 163, 184)
+
+        sub_surf = self.font_body.render(sub_text, True, sub_col)
+        self.screen.blit(sub_surf, (card_x + (card_w - sub_surf.get_width()) // 2, card_y + 54))
+
+        # Bottom hint
+        hint_surf = self.font_hint.render("[Esc] cancel  •  [Ctrl+Shift+V] finish", True, (108, 112, 134))
+        self.screen.blit(hint_surf, (card_x + (card_w - hint_surf.get_width()) // 2, card_y + card_h - 18))
 
     def _render_thinking_card(self, card_rect: pygame.Rect):
         """Draw an animated thinking / formulating reply card above or below the companion."""

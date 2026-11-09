@@ -41,6 +41,14 @@ class Config:
     tts_rate: str = "+6%"
     tts_pitch: str = "+0Hz"
     
+    # Voice Command / Speech-to-Text (STT) Settings
+    voice_input_enabled: bool = True
+    voice_input_hotkey: str = "ctrl+shift+v"
+    stt_engine: str = "groq_whisper"  # "groq_whisper" | "gemini"
+    mic_silence_timeout: float = 1.2
+    mic_energy_threshold: int = 400
+    mic_device_index: int | None = None
+
     # Overlay UI settings
     halo_size: int = 70
     initial_x: int = -1

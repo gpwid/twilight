@@ -175,6 +175,13 @@ class SciTwiSettingsCard:
         self.rvc_pitch = getattr(self.cfg, "rvc_pitch", 0)
         self.rvc_index = getattr(self.cfg, "rvc_index_rate", 0.65)
 
+        # Voice Input / STT values
+        self.voice_input_enabled = getattr(self.cfg, "voice_input_enabled", True)
+        self.stt_engine = getattr(self.cfg, "stt_engine", "groq_whisper")
+        self.mic_silence_timeout = getattr(self.cfg, "mic_silence_timeout", 1.2)
+        self.mic_test_active = False
+        self.mic_test_level = 0.0
+
         # Tab navigation: 0 = Brain & Models, 1 = Voice & Audio, 2 = Shortcuts
         self.current_tab = 0
 
@@ -430,6 +437,10 @@ class SciTwiSettingsCard:
             self.cfg.use_rvc = self.use_rvc
             self.cfg.rvc_pitch = int(self.rvc_pitch)
             self.cfg.rvc_index_rate = float(self.rvc_index)
+
+            self.cfg.voice_input_enabled = self.voice_input_enabled
+            self.cfg.stt_engine = self.stt_engine
+            self.cfg.mic_silence_timeout = float(self.mic_silence_timeout)
 
             self.cfg.save()
             self.status_msg = f"Settings saved! Primary: {primary_model}"
@@ -857,6 +868,54 @@ class SciTwiSettingsCard:
         t_surf = self.font_bold.render("▶ Test Voice", True, C_CYAN)
         self.screen.blit(t_surf, (self.rect_test_btn.x + (self.rect_test_btn.width - t_surf.get_width()) // 2, self.rect_test_btn.y + 6))
 
+        # Divider between TTS and STT
+        pygame.draw.line(self.screen, C_WELL_BORDER, (well.x + 12, well.y + 200), (well.x + well.width - 12, well.y + 200), 1)
+
+        # Speech-to-Text (STT) Settings Section
+        lbl_stt = self.font_bold.render("Speech Recognition (STT):", True, C_STAR)
+        self.screen.blit(lbl_stt, (well.x + 12, well.y + 210))
+
+        stt_opts = [
+            ("groq_whisper", "Groq Whisper (~200ms)", 180),
+            ("gemini", "Gemini Multimodal", 150)
+        ]
+        self.stt_rects = {}
+        sx = well.x + 12
+        for sid, sname, sw in stt_opts:
+            sr = pygame.Rect(sx, well.y + 236, sw, 26)
+            self.stt_rects[sid] = sr
+            is_s = (self.stt_engine == sid)
+            bg = C_BORDER if is_s else C_BG
+            border = C_STAR if is_s else C_WELL_BORDER
+            fg = (255, 255, 255) if is_s else C_MUTED
+            pygame.draw.rect(self.screen, bg, sr, border_radius=6)
+            pygame.draw.rect(self.screen, border, sr, width=1, border_radius=6)
+            s_surf = self.font_bold.render(sname, True, fg)
+            self.screen.blit(s_surf, (sr.x + (sr.width - s_surf.get_width()) // 2, sr.y + 4))
+            sx += sw + 10
+
+        self.rect_stt_groq = self.stt_rects.get("groq_whisper")
+        self.rect_stt_gemini = self.stt_rects.get("gemini")
+
+        # Silence Cutoff Timeout
+        lbl_sil = self.font_body.render(f"Silence Auto-Cutoff: {self.mic_silence_timeout:.1f}s", True, C_TEXT)
+        self.screen.blit(lbl_sil, (well.x + 12, well.y + 276))
+
+        self.rect_silence_down = pygame.Rect(well.x + 196, well.y + 272, 32, 24)
+        self.rect_silence_up = pygame.Rect(well.x + 234, well.y + 272, 32, 24)
+        pygame.draw.rect(self.screen, C_BG, self.rect_silence_down, border_radius=5)
+        pygame.draw.rect(self.screen, C_BG, self.rect_silence_up, border_radius=5)
+        pygame.draw.rect(self.screen, C_WELL_BORDER, self.rect_silence_down, width=1, border_radius=5)
+        pygame.draw.rect(self.screen, C_WELL_BORDER, self.rect_silence_up, width=1, border_radius=5)
+        sd_t = self.font_bold.render("-", True, C_TEXT)
+        su_t = self.font_bold.render("+", True, C_TEXT)
+        self.screen.blit(sd_t, (self.rect_silence_down.x + 11, self.rect_silence_down.y + 2))
+        self.screen.blit(su_t, (self.rect_silence_up.x + 10, self.rect_silence_up.y + 2))
+
+        # Bottom Voice Command Shortcut info
+        lbl_vh = self.font_hint.render("Global Voice Hotkey: Ctrl + Shift + V  •  Click 🎙️ inside dialogue card", True, C_MUTED)
+        self.screen.blit(lbl_vh, (well.x + 12, well.y + 312))
+
     # =========================================================================
     # TAB 2: SHORTCUTS & SYSTEM
     # =========================================================================
@@ -866,6 +925,7 @@ class SciTwiSettingsCard:
 
         shortcuts = [
             ("Ctrl + Shift + Space", "Summon Twilight input card immediately"),
+            ("Ctrl + Shift + V", "Activate voice command / speech recognition"),
             ("Ctrl + Shift + P", "Toggle perching on active window ledge"),
             ("Ctrl + Shift + Q", "Toggle quiet study / research mode")
         ]
@@ -1089,6 +1149,28 @@ class SciTwiSettingsCard:
                         frac = (mx - self.rect_timbre_bar.x) / float(self.rect_timbre_bar.width)
                         self.rvc_index = round(max(0.0, min(1.0, frac)), 2)
                         return True
+
+                # STT engine & silence timeout controls
+                if hasattr(self, "rect_stt_groq") and self.rect_stt_groq and self.rect_stt_groq.collidepoint(mx, my):
+                    self.stt_engine = "groq_whisper"
+                    self.status_msg = "STT: Groq Whisper (ultra-fast ~200ms)"
+                    self.status_col = C_CYAN
+                    return True
+                if hasattr(self, "rect_stt_gemini") and self.rect_stt_gemini and self.rect_stt_gemini.collidepoint(mx, my):
+                    self.stt_engine = "gemini"
+                    self.status_msg = "STT: Google Gemini Multimodal Audio"
+                    self.status_col = C_CYAN
+                    return True
+                if hasattr(self, "rect_silence_down") and self.rect_silence_down and self.rect_silence_down.collidepoint(mx, my):
+                    self.mic_silence_timeout = max(0.6, round(self.mic_silence_timeout - 0.2, 1))
+                    self.status_msg = f"Silence cutoff set to {self.mic_silence_timeout:.1f}s"
+                    self.status_col = C_CYAN
+                    return True
+                if hasattr(self, "rect_silence_up") and self.rect_silence_up and self.rect_silence_up.collidepoint(mx, my):
+                    self.mic_silence_timeout = min(3.0, round(self.mic_silence_timeout + 0.2, 1))
+                    self.status_msg = f"Silence cutoff set to {self.mic_silence_timeout:.1f}s"
+                    self.status_col = C_CYAN
+                    return True
 
             self.active_input = None
             self.input_selected_all = False

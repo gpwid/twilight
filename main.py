@@ -11,6 +11,7 @@ from audio_manager import AudioManager
 from brain import SciTwiBrain
 from overlay import SciTwiOverlay
 import overlay
+from voice_input import VoiceInputManager
 
 def main():
     try:
@@ -140,25 +141,75 @@ def main():
     overlay_ref[0] = overlay
     print(f"[Brain] Active Provider: {config.provider.capitalize()} | Primary Model: {config.model}")
 
-    # 6. Register Global Hotkeys (Ctrl+Shift+Space summon, Ctrl+Shift+P perch, Ctrl+Shift+Q study)
-    def setup_global_hotkeys(summon_callback, perch_callback, study_callback):
+    # 6. Initialize Voice Command & Speech-to-Text Manager
+    def on_voice_state_change(new_state, details):
+        ov = overlay_ref[0]
+        if ov:
+            ov.voice_state = new_state
+            ov.voice_details = details
+            if new_state in ("listening", "recording"):
+                ov.set_state("thinking", details)
+            elif new_state == "processing":
+                ov.set_state("thinking", "Processing voice command...")
+            elif new_state == "idle":
+                if not ov.is_processing and not ov.show_response:
+                    ov.restore_ambient_state()
+
+    def on_voice_audio_level(level):
+        ov = overlay_ref[0]
+        if ov:
+            ov.voice_audio_level = level
+
+    def on_voice_transcription(recognized_text):
+        if not recognized_text:
+            return
+        ov = overlay_ref[0]
+        if ov:
+            ov.voice_state = "idle"
+            ov.show_input = False
+        on_user_submit(recognized_text)
+
+    def on_voice_error(err_msg):
+        ov = overlay_ref[0]
+        if ov:
+            ov.voice_state = "idle"
+            ov.status_message = "Ready"
+
+    voice_mgr = VoiceInputManager(
+        config=config,
+        is_speaking_fn=audio.is_speaking,
+        on_state_change=on_voice_state_change,
+        on_audio_level=on_voice_audio_level,
+        on_transcription_complete=on_voice_transcription,
+        on_error=on_voice_error,
+    )
+    overlay.set_voice_input_manager(voice_mgr)
+    print(f"[VoiceInput] Engine: {getattr(config, 'stt_engine', 'groq_whisper')} | Hotkey: {getattr(config, 'voice_input_hotkey', 'ctrl+shift+v')}")
+
+    # 7. Register Global Hotkeys (Ctrl+Shift+Space summon, Ctrl+Shift+V voice, Ctrl+Shift+P perch, Ctrl+Shift+Q study)
+    def setup_global_hotkeys(summon_callback, voice_callback, perch_callback, study_callback):
         import ctypes
         import ctypes.wintypes
         user32 = ctypes.windll.user32
         MOD_CONTROL = 0x0002
         MOD_SHIFT = 0x0004
         VK_SPACE = 0x20
+        VK_V = 0x56
         VK_P = 0x50
         VK_Q = 0x51
         HOTKEY_SUMMON = 8888
         HOTKEY_PERCH = 8889
         HOTKEY_STUDY = 8890
+        HOTKEY_VOICE = 8891
 
         def hotkey_loop():
             registered = []
             if user32.RegisterHotKey(None, HOTKEY_SUMMON, MOD_CONTROL | MOD_SHIFT, VK_SPACE):
                 registered.append(HOTKEY_SUMMON)
                 print("[Hotkey] Global summon shortcut (Ctrl+Shift+Space) active.")
+            if user32.RegisterHotKey(None, HOTKEY_VOICE, MOD_CONTROL | MOD_SHIFT, VK_V):
+                registered.append(HOTKEY_VOICE)
+                print("[Hotkey] Global voice command shortcut (Ctrl+Shift+V) active.")
             if user32.RegisterHotKey(None, HOTKEY_PERCH, MOD_CONTROL | MOD_SHIFT, VK_P):
                 registered.append(HOTKEY_PERCH)
                 print("[Hotkey] Window perching toggle (Ctrl+Shift+P) active.")
@@ -172,6 +223,8 @@ def main():
                     if msg.message == 0x0312:  # WM_HOTKEY
                         if msg.wParam == HOTKEY_SUMMON:
                             summon_callback()
+                        elif msg.wParam == HOTKEY_VOICE:
+                            voice_callback()
                         elif msg.wParam == HOTKEY_PERCH:
                             perch_callback()
                         elif msg.wParam == HOTKEY_STUDY:
@@ -187,11 +240,12 @@ def main():
 
     setup_global_hotkeys(
         summon_callback=lambda: overlay.summon(),
+        voice_callback=lambda: voice_mgr.toggle_listening(),
         perch_callback=lambda: overlay.toggle_perch(),
         study_callback=lambda: overlay.toggle_study_mode()
     )
 
-    # 7. Dynamic Autonomous Proactive Desktop Observer
+    # 8. Dynamic Autonomous Proactive Desktop Observer
     def check_proactive_commentary():
         now = time.time()
         # Minimum 240s (4 mins) cooldown from any speech
@@ -320,6 +374,10 @@ def main():
                             if audio_changed:
                                 audio.reload_config(new_cfg)
                                 print(f"[AudioManager] Settings updated from disk: engine={new_cfg.tts_engine}")
+                            voice_mgr.config = new_cfg
+                            voice_mgr.silence_timeout = getattr(new_cfg, "mic_silence_timeout", 1.2)
+                            voice_mgr.energy_threshold = getattr(new_cfg, "mic_energy_threshold", 400)
+                            voice_mgr.stt_engine = getattr(new_cfg, "stt_engine", "groq_whisper")
                         except Exception as e:
                             print(f"[Main] Error reloading config: {e}")
 
